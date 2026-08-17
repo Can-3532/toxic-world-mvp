@@ -1,4 +1,4 @@
-# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7)
+# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7/2.8)
 
 Verified against the repository on disk (Freebuff Web / Vly sandbox).
 Everything below is grounded in actual files; anything not in the repo is
@@ -50,6 +50,52 @@ is **unchanged** in v0.4 — see §13 for the v0.3 compliance matrix.
 | Collapse consistency | Player-held waste (cargo/storage/processing) is lost with the world so Layer 2 stays exact on reset; balances and upgrades carry over | `world.ts` collapse branch + `engineSim.ts` | post-collapse invariant tests |
 
 ---
+
+## SPRINT 2.8 — TIME COMPRESSION & ECONOMY VALIDATION (5 s tick)
+
+## TIME MODEL — TWO AXES (official; supersedes the old single-axis wording)
+
+| Axis | Granularity | Mechanics | Anchors |
+|---|---|---|---|
+| REAL TIME | 1 real second | robot movement (m/s), battery drain/recharge, burner (kg/s) | `ROBOT.*`, `PROCESSING_KG_PER_S` |
+| GAME TIME | 1 tick = 1 game minute | base generation, pollution economy, replenishment Model C, demand | `BASE_GEN_KG_H`, `REPLENISHMENT.*`, `DEMAND_REF_KG_H` |
+
+`1 game-h = 60 ticks = 5 real-min`; **kg/real-h = 12 × kg/game-h**; real-h = game-h / 12.
+REAL-anchored rates never change with tick length; GAME-anchored rates are
+applied per tick via `GAME_MINUTES_PER_TICK/60` and are identical per tick at
+any tick length — the 5 s tick (Sprint 2.7 B) preserves the per-game-hour
+economy by construction.
+
+Measured results (`bun test tests/economyValidation.test.ts`, 14 tests green):
+
+| Quantity (starter) | GAME TIME | REAL TIME |
+|---|---|---|
+| Base generation | 50 kg/game-h | 600 kg/real-h |
+| Burner capacity | 600 kg/game-h | 7,200 kg/real-h |
+| Starter collection (measured emergent) | 174.4 kg/game-h | 2,092.6 kg/real-h |
+| Starter TOX | 92.0 TOX/game-h | 1,103.4 TOX/real-h |
+| 24-h TOX | 2,206.7 | 26,480.4 |
+| Cargo L2 / L3 / L4 / L5 | 1.63 / 4.08 / 7.78 / 13.32 game-h | 0.14 / 0.34 / 0.65 / 1.11 real-h |
+
+Key findings:
+1. Per-game-hour economy preserved tick-for-tick under the 5 s tick (Model C
+   formula, hidden-pool monotonicity, both invariants — verified every tick).
+2. **Measured starter throughput ≈ 174 kg/game-h ≈ 4× the design reference
+   (38.34 kg/h)** → upgrades ~4.8× faster in game-hours than the old targets
+   (which were based on the 38.34 reference). The Model C demand reference
+   (42 kg/game-h) is far below measured demand ⇒ ratio sits at the 5 % floor
+   in practice ⇒ replenishment effectively floor-rate. Design decision needed:
+   re-anchor the demand reference to measured throughput or keep 42 as a
+   deliberate scarcity lever. NOT caused by the tick change (same behavior at
+   2 s) — the reference was simply never calibrated against the spatial engine.
+3. Burn Zone unchanged: avg interval ≈ 92 s, active ≈ 26.5 % of real time,
+   starter encounter ≈ 34 % of burned TOX.
+4. Pollution worst-case: 10K → collapse ≈ 10.3 game-h (0.86 real-h); 1K →
+   ≈ 102.7 game-h (8.6 real-h). Upper bound — synthetic players don't
+   auto-queue (their seeded queues burn once); live players burning steadily
+   remove far more.
+5. Storage (starter): fill ≈ 0.35 game-h, ~8.8 unloads/game-h, max backlog
+   20 kg (burner clears 60 kg in 30 real-s).
 
 ## SPRINT 2.7 — TICK ARCHITECTURE (A/B/C decision, measured on dev)
 
@@ -529,20 +575,25 @@ concurrency — double-advance cannot occur; no guard fix needed. Continuation
 added: burn-loop sharding for the 10k write budget and the `advanceBurn`
 idempotency-contract fix, both covered by the headless suite.)
 
-## NEXT IMMEDIATE TASK (Sprint 2.7 — A is the only open item)
-1. **Unblock solution A** — create a production deployment for this project:
-   Convex dashboard → project `e534bc6b…` → Deployments → create production
-   (or provide a prod deploy key). Then:
+## NEXT IMMEDIATE TASK
+**Launch plan (Sprint 2.8 confirms B for MVP):**
+1. **MVP development: keep B (5 s tick).** 2.8 verified the per-game-hour
+   economy is preserved and the tick cadence is stable at 10k.
+2. **Pre-launch: production benchmark (A).** Create a production deployment in
+   the Convex dashboard (or provide a prod deploy key) and run the runbook:
    ```
    CONVEX_DEPLOYMENT=<prod-url> bunx convex deploy
    bunx convex run harness:resetWorld --prod
    bunx convex run harness:seedLoad '{"count":2000,...}' --prod  (×5)
-   bunx convex run harness:tickOnce --prod                     (×6, read tickMs + dbReadOps/dbWriteOps)
+   bunx convex run harness:tickOnce --prod                     (×6, tickMs + dbReadOps/dbWriteOps)
    bunx convex run harness:benchStatus --prod && bunx convex run harness:invariantAudit --prod
    bunx convex run harness:cleanupLoad '{"limit":500}' --prod (loop) && bunx convex run harness:resetWorld --prod
    ```
-   Compare DEV vs PROD p50/p95 (DEV: 2.4/3.6 s at 10k). If PROD < 1 s, the
-   architecture is fine — deploy and re-measure; if PROD ≈ DEV (~3 s), B is
-   the right MVP answer and C is the future scale path.
-2. Rebalance Storage/Battery P1 costs using the recorded progression ROI.
-3. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.
+   Decision matrix: PROD < 1 s → re-evaluate B (could go back to a faster
+   tick); PROD ≈ 3 s → B stays; PROD > 5 s → C (spatial sharding) comes into
+   play.
+3. **Design follow-up from 2.8 (before launch):** decide the Model C demand
+   reference — re-anchor to measured throughput (~174 kg/game-h starter) or
+   keep 42 as a deliberate scarcity lever; then rebalance Storage/Battery P1
+   costs with the measured progression rates (game-h and real-h columns).
+4. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.

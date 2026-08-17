@@ -90,6 +90,27 @@ See `.env.example` (or `docs/ENV_VARIABLES.md` if the platform blocks the
 UI, never in committed files. Real Solana vars (`COINBASE_COMMERCE_*`,
 `SOLANA_TREASURY_PRIVATE_KEY`) are **planned, not used** by any code yet.
 
+## Time model — TWO AXES (formal, Sprint 2.8)
+
+Every mechanic is anchored to exactly ONE time axis. `1 game hour = 60 ticks
+= 5 real minutes` (12× compression since Sprint 2.7 B; was 30× at 2 s/tick).
+
+| Axis | Granularity | Mechanics | Anchored to |
+|---|---|---|---|
+| **REAL TIME** | 1 real second | Robot movement (m/s), battery drain/recharge, burn rate (kg/s) | `ROBOT.*`, `WORLD.PROCESSING_KG_PER_S` |
+| **GAME TIME** | 1 tick = 1 game minute | Base generation, pollution economy, replenishment (Model C), demand | `WORLD.BASE_GEN_KG_H`, `REPLENISHMENT`, `DEMAND_REF_KG_H` (all kg per game hour) |
+
+Conversions (5 s tick, 1 game-min/tick): `1 game-h = 60 ticks = 5 real-min`;
+**kg/real-h = 12 × kg/game-h**; real-h times = game-h / 12.
+
+- REAL-anchored rates are invariant across tick cadence changes: a robot's
+  trip time, battery spend and the burner's 2 kg/s never depend on tick length.
+- GAME-anchored rates (generation 50 kg/game-h, replenishment clip, demand
+  reference 42 kg/game-h) are applied per tick via `GAME_MINUTES_PER_TICK/60`,
+  so changing `TICK_SECONDS` does NOT change the per-game-hour economy.
+- The burner slice per tick is REAL-anchored (kg/s × tick length): 10 kg/tick
+  at 5 s ⇒ 600 kg/game-h and 7,200 kg/real-h.
+
 ## The game loop (server-side)
 
 1. Every 5 s the cron `toxic-world-tick` calls `api.world.tick` (1 tick = 1 game
@@ -107,9 +128,10 @@ UI, never in committed files. Real Solana vars (`COINBASE_COMMERCE_*`,
 ## Tests
 
 ```bash
-bun test tests/                 # all 55 tests (26 economy + 29 engine), 179 assertions
+bun test tests/                 # all 69 tests (26 economy + 29 engine + 14 economy-validation), 3,686 assertions
 bun test tests/engine.test.ts   # production engine test harness (Sprint 2.4 + 2.5 + 2.6)
 bun test tests/economy.test.ts  # v0.4 reward formulas, idempotency, pollution accounting
+bun test tests/economyValidation.test.ts  # Sprint 2.8: 5 s-tick economy (two time axes)
 
 # Live invariant audit against the deployed Convex engine (read-only):
 bunx convex run harness:invariantAudit
@@ -142,6 +164,47 @@ step-for-step. Coverage:
 # fields seedPollutionKg/generatedKg from first principles):
 bunx convex run harness:reanchorInvariant
 ```
+
+### Sprint 2.8 — time compression & economy validation (5 s tick)
+
+Measured by `bun test tests/economyValidation.test.ts` (deterministic oracle
+sim — same pure functions as the engine; 14 tests, green). Both axes explicit:
+
+| Quantity (starter, measured) | GAME TIME | REAL TIME |
+|---|---|---|
+| Base generation | 50 kg/game-h | 600 kg/real-h |
+| Burner capacity | 600 kg/game-h (10 kg/tick) | 7,200 kg/real-h (2 kg/s) |
+| Starter collection (emergent) | **174.4 kg/game-h** | 2,092.6 kg/real-h |
+| Starter TOX | **92.0 TOX/game-h** | 1,103.4 TOX/real-h |
+| 24-hour TOX | **2,206.7** | 26,480.4 |
+
+Starter → Cargo upgrades (measured; old design targets in parens):
+
+| | L2 | L3 | L4 | L5 |
+|---|---|---|---|---|
+| game-h | **1.63** (7.8) | **4.08** (19.6) | **7.78** (37.3) | **13.32** (63.9) |
+| real-h | **0.14** | **0.34** | **0.65** | **1.11** |
+
+Findings:
+1. **5 s tick preserves the per-game-hour economy.** Every per-tick delta is
+   `GAME_MINUTES_PER_TICK`-anchored and identical to the 2 s-tick world; Model C
+   verified tick-for-tick (`clip(0.05×demand/gen, 5%, 9%)`), hidden pool drains
+   monotonically, both invariants hold every tick at machine precision.
+2. **Measured starter throughput ≈ 174 kg/game-h ≈ 4× the design's 38.34 kg/h
+   reference** → upgrades are ~4.8× faster in game-hours. Consequence: the
+   Model C demand reference (42 kg/game-h) is far below real demand, so the
+   demand/gen ratio sits at the **5% floor** in practice — replenishment is
+   effectively floor-rate. Design follow-up (not a bug): re-anchor the demand
+   reference to measured throughput, or keep 42 deliberately as a scarcity
+   lever. A live starter measurement is recommended before rebalancing.
+3. **Burn Zone unchanged by the tick change:** ~39 spawns/real-h (avg interval
+   92 s), active 26.5% of real time, starter encounter ≈ 34% of burned TOX.
+4. **Pollution worst-case** (synthetic players don't auto-queue, so burns are
+   one-time): 10K → collapse ≈ 10.3 game-h (0.86 real-h); 1K → ≈ 102.7 game-h
+   (8.6 real-h). Live players queueing steadily burn far more → slower
+   collapse; the numbers are an upper bound.
+5. **Storage (starter):** fill ≈ 0.35 game-h, ~8.8 unloads/game-h, processing
+   backlog ≤ 20 kg (burner clears a full 60 kg storage in 30 real-s).
 
 ### Sprint 2.7 — tick architecture (A/B/C decision)
 
