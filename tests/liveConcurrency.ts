@@ -28,7 +28,7 @@ function parseJson(out: string): any {
 
 function convexRunSync(fn: string, args?: Record<string, unknown>): any {
   const argv = ["convex", "run", fn];
-  if (args) argv.push("--args", JSON.stringify(args));
+  if (args) argv.push(JSON.stringify(args)); // positional (this CLI has no --args)
   const out = execFileSync("bunx", argv, {
     encoding: "utf8",
     timeout: 150_000,
@@ -40,7 +40,7 @@ function convexRunSync(fn: string, args?: Record<string, unknown>): any {
 function convexRun(fn: string, args?: Record<string, unknown>): Promise<any> {
   return new Promise((resolve, reject) => {
     const argv = ["convex", "run", fn];
-    if (args) argv.push("--args", JSON.stringify(args));
+    if (args) argv.push(JSON.stringify(args)); // positional (this CLI has no --args)
     execFile(
       "bunx",
       argv,
@@ -92,11 +92,13 @@ async function main(): Promise<void> {
   };
 
   // ---- PART 2 — guarded path: 3 concurrent world:tick --------------------
+  const tPre2 = Date.now();
   const pre2 = convexRunSync("harness:worldStateProbe");
   const guarded = await Promise.all(
     Array.from({ length: 3 }, () => convexRun("world:tick")),
   );
   const post2 = convexRunSync("harness:worldStateProbe");
+  const wallMs = Date.now() - tPre2;
 
   const gAdvanced = guarded.filter((r) => r.advanced === true).length;
   const tickIndexDelta = post2.tickIndex - pre2.tickIndex;
@@ -106,10 +108,14 @@ async function main(): Promise<void> {
   const maxTickMs = Math.max(...guarded.map((r) => r.tickMs ?? 0));
   const allowed =
     maxTickMs < 1600 ? 1 : 1 + Math.floor(maxTickMs / 1600);
+  // The cron fires every 2 s and may legitimately advance inside our
+  // measurement window (each in its own guard window). Bound total world
+  // advancement by our advances + the number of cron windows that fit.
+  const cronCeiling = Math.ceil(wallMs / 1600);
   const guardedPass =
     gAdvanced <= allowed &&
     tickIndexDelta >= gAdvanced &&
-    tickIndexDelta <= gAdvanced + 1; // +1 tolerates a cron tick in the gap
+    tickIndexDelta <= gAdvanced + cronCeiling + 1;
 
   results.guarded = {
     fired: 3,
@@ -118,6 +124,8 @@ async function main(): Promise<void> {
     maxTickMs,
     results: guarded.map((r) => ({ advanced: r.advanced, tickMs: r.tickMs })),
     tickIndexDelta,
+    cronCeiling,
+    wallMs,
     pass: guardedPass,
   };
 

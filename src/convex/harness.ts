@@ -446,6 +446,11 @@ export const cleanupLoad = mutation({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
     const limit = args.limit ?? 500;
+    // Sprint 2.6 continuation: the 4,096-write-per-mutation budget applies
+    // here too — a 10k bench leaves ledger rows on thousands of players, so
+    // 500 players × ~10 rows would exceed it. Budget the deletes and return
+    // partial progress; the driver loops until `done`.
+    const WRITE_BUDGET = 3000;
     const synth = await ctx.db
       .query("players")
       .filter((q) => q.eq(q.field("name"), LOAD_PLAYER_NAME))
@@ -458,6 +463,9 @@ export const cleanupLoad = mutation({
         .query("rewardLedger")
         .withIndex("by_player", (q) => q.eq("playerId", p._id))
         .collect();
+      if (playersDeleted + ledgerDeleted + rows.length + 1 > WRITE_BUDGET) {
+        break;
+      }
       for (const r of rows) {
         await ctx.db.delete(r._id);
         ledgerDeleted++;
@@ -475,15 +483,25 @@ export const cleanupLoad = mutation({
         });
       }
     }
-    // remove the shared synthetic user once no synthetic players remain
-    if (playersDeleted === 0 || playersDeleted < limit) {
+    // remove the shared synthetic user ONLY when no synthetic players remain
+    // (a partial pass must never delete it while more players are pending)
+    const remaining = await ctx.db
+      .query("players")
+      .filter((q) => q.eq(q.field("name"), LOAD_PLAYER_NAME))
+      .take(1);
+    if (remaining.length === 0) {
       const user = await ctx.db
         .query("users")
         .filter((q) => q.eq(q.field("name"), LOAD_USER_NAME))
         .first();
       if (user) await ctx.db.delete(user._id);
     }
-    return { playersDeleted, ledgerDeleted, returnedKg };
+    return {
+      playersDeleted,
+      ledgerDeleted,
+      returnedKg,
+      done: remaining.length === 0,
+    };
   },
 });
 

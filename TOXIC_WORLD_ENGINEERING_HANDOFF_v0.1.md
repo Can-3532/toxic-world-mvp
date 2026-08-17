@@ -62,8 +62,10 @@ is **unchanged** in v0.4 — see §13 for the v0.3 compliance matrix.
 | Load 10,000 — finding 2 | Live re-run **BLOCKED by platform**: deployment disabled for exceeding the free-tier usage limit (cumulative session I/O). Re-enable/raise the limit in the Convex dashboard → `bun tests/liveBench.ts 10000 5` → cleanup | platform error, all calls failing |
 | Load 10,000 — finding 3 (2.6 continuation) | The sharded-robot fix alone was NOT enough for the write budget: at 10k a tick also burns ~2,000 queues (2,000 patches + 2,000 ledger inserts) ⇒ ~6.5k writes > 4,096. Fixed with **sharded burn processing** — the burn loop now runs only for the tick's round-robin shard (worlds ≤ 2,500 unchanged), keeping a 10k tick ≈ 3.5k writes | `world.ts` §6, `gameParams.ts ROBOTS_PER_TICK`, `tests/engine.test.ts` §10 |
 | Idempotency contract | `economy.advanceBurn` contradicted its own doc comment: on an already-rewarded slice it pinned `sliceIndex`, so one stale replay would lock a whole processing session out of TOX forever. Now always advances `sliceIndex` (duplicate burns kg with ZERO credit, next slice gets a fresh key) — covered by `tests/economy.test.ts` | `economy.ts`, test "duplicate slice burns WITHOUT credit but still advances the key" |
-| Live re-run status | Concurrency + load re-runs STILL BLOCKED at handoff: the deployment is disabled (usage limit) and `harness:benchStatus` returns the platform error. All drivers are in place and fail fast with the actionable message; no code change is possible until the limit is raised | `bun tests/liveConcurrency.ts` observed failing with the deployment-disabled error |
-| Stranded data | 10,000 `LOADTEST` players + 1 synthetic user remain in the dev DB (cleanup could not run while disabled). Recover with looped `bunx convex run harness:cleanupLoad '{"limit":500}'` then `harness:resetWorld` | `harness:cleanupLoad` |
+| LIVE RE-RUN (usage limit re-enabled) | Full sequence executed on the real deployment: cleanup stranded 10k → `resetWorld` → `liveConcurrency` → `liveBench` 10/100/1k/10k → `invariantAudit` → cleanup → `resetWorld`. **Concurrency PASS** (5/5 unthrottled exact-multiple; 3 guarded → 0 advances, no double tick). **Correctness PASS at every scale** (invariants ~1e-8, 0 dup reservations, ledger keys unique). **10k performance target NOT MET** (tick 2.8–3.8 s vs < 1 s; no failures/write-limit errors; see finding 4 below) | live runs, `bun tests/liveConcurrency.ts`, `bun tests/liveBench.ts` |
+| 10k performance — finding 4 | Tick time is dominated by Convex dev-deployment per-doc read/write overhead (~10k doc reads + ~800 writes/tick): 6/6 ticks at 2.8–3.8 s (p50 3.4 s, p95/p99 3.8 s). The no-op-write skip for unchanged robots (this continuation) helped ~10 % (p50 3.4 → 3.1 s) and is kept. Cron drift observed at 10k (tick > 2 s cron interval ⇒ world runs at ~60 % real-time). Paths to < 1 s: prod (non-dev) deployment, or parallel per-shard tick mutations | `world.ts` stepRobot change + live A/B on the same 10k population |
+| Cleanup hardening | `cleanupLoad` hit `OptimisticConcurrencyControlFailure` (the final world-doc patch races the 2 s cron) and would exceed the 4,096-write budget at 10k (500 players × ~10 ledger rows). Fixed: write-budgeted deletes + `done` flag + user deleted only when truly done; live drivers retry with backoff and pass args positionally (this CLI has no `--args`) | `harness.ts cleanupLoad`, `tests/liveBench.ts`, `tests/liveConcurrency.ts` |
+| Stranded data | RESOLVED — all 10,000 `LOADTEST` players + synthetic user removed; world back to pristine World 0 (50%, skew 0) | live `cleanupLoad` loops + `resetWorld` |
 
 New harness tools: `harness:seedLoad`, `harness:tickOnce` (unguarded, returns engine tickMs incl. DB ops), `harness:benchStatus`, `harness:cleanupLoad`, `harness:worldStateProbe`, `harness:concurrencyProbe` (one-shot tick-guard atomicity probe via nested `ctx.runMutation(api.world.tick)`), `tests/liveBench.ts`, `tests/liveConcurrency.ts`.
 
@@ -503,9 +505,11 @@ had leaked ~13.5 t of phantom pool mass.
 2. No Solana integration of any kind (wallet, transactions, treasury) — SOL is
    mock by design under v0.4.
 3. No production deployment configured (dev-only).
-4. Live 10k benchmark unverified end-to-end: the 4,096-op ceiling is fixed by
-   sharding (robots AND burn), the headless 10k sim passes (≈55 ms/tick), but
-   the final live run is pending the quota reset.
+4. **Live 10k benchmark: RUN — correctness passes, performance target fails.**
+   6/6 ticks, no failures, no write-limit errors, invariants ~1e-8, but tick
+   p50 ≈ 3.1–3.4 s vs the < 1 s target (dev-deployment per-doc overhead
+   dominates; headless 10k sim ≈ 55 ms/tick). Path options in
+   NEXT IMMEDIATE TASK.
 5. Storage/Battery upgrade costs are P1 placeholders awaiting rebalance.
 
 (Resolved in Sprint 2.6: the non-atomic tick guard was verified SAFE under
@@ -513,17 +517,14 @@ concurrency — double-advance cannot occur; no guard fix needed. Continuation
 added: burn-loop sharding for the 10k write budget and the `advanceBurn`
 idempotency-contract fix, both covered by the headless suite.)
 
-## NEXT IMMEDIATE TASK
-**Re-enable/raise the dev-deployment usage limit in the Convex dashboard**
-(deployment `jovial-chickadee-617`,
-https://dashboard.convex.dev/t/freebuff/e534bc6b-b9e1-4f27-b6f0-2034cba0df18/jovial-chickadee-617),
-then in order:
-1. `bunx convex run harness:cleanupLoad '{"limit":500}'` (loop until
-   `playersDeleted == 0`) — removes the stranded 10k `LOADTEST` players;
-2. `bunx convex run harness:resetWorld` — restore the clean World 0 baseline;
-3. `bun tests/liveConcurrency.ts` — Sprint 2.6 tick-guard atomicity re-run
-   (expect: 5/5 unthrottled advances exact-multiple, ≤1 guarded advance);
-4. `bun tests/liveBench.ts 10000 5 0.5 0.05` — final 10k latency numbers
-   (acceptance target: tick < 1 s);
-5. `bunx convex run harness:cleanupLoad '{"limit":500}'` (loop) — clean up;
-6. rebalance Storage/Battery P1 costs using the recorded progression ROI.
+## NEXT IMMEDIATE TASK (Sprint 2.6 live leg COMPLETE — see §SPRINT 2.6)
+The live sequence was executed end-to-end and the deployment is back on the
+pristine World 0 baseline. Remaining:
+1. **10k performance target (< 1 s) NOT met** (p50 ≈ 3.1–3.4 s on the dev
+   deployment). Decide the path: (a) production (non-dev) Convex deployment
+   and re-measure, or (b) restructure the tick into parallel per-shard
+   mutations (each shard its own mutation + world write serialized), or
+   (c) accept ~3 s as the MVP cadence and lengthen the cron interval
+   (`WORLD.TICK_SECONDS`) so cron drift disappears.
+2. Rebalance Storage/Battery P1 costs using the recorded progression ROI.
+3. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.

@@ -35,7 +35,7 @@ function parseJson(out: string): any {
 
 function convexRun(fn: string, args?: Record<string, unknown>): any {
   const argv = ["convex", "run", fn];
-  if (args) argv.push("--args", JSON.stringify(args));
+  if (args) argv.push(JSON.stringify(args)); // positional (this CLI has no --args)
   const out = execFileSync("bunx", argv, {
     encoding: "utf8",
     timeout: 150_000,
@@ -58,16 +58,31 @@ const report: Record<string, unknown> = {
   startedAt: new Date().toISOString(),
 };
 
-function cleanup(): { loops: number; deleted: number } {
+function sleepSync(ms: number): void {
+  // zero-cost sync sleep that works in Node/Bun without spawning a process
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function cleanup(): { loops: number; deleted: number; retries: number } {
   let loops = 0;
   let deleted = 0;
+  let retries = 0;
   while (loops < 200) {
-    const r = convexRun("harness:cleanupLoad", { limit: CLEANUP_LIMIT });
-    deleted += r.playersDeleted;
-    loops++;
-    if (r.playersDeleted === 0) break;
+    try {
+      const r = convexRun("harness:cleanupLoad", { limit: CLEANUP_LIMIT });
+      deleted += r.playersDeleted;
+      loops++;
+      if (r.done === true) break;
+    } catch {
+      // cleanupLoad patches the world doc (returning held waste) and the cron
+      // rewrites it every 2 s → occasional OptimisticConcurrencyControlFailure.
+      // The mutation is atomic, so a retry with backoff is always safe.
+      retries++;
+      if (retries > 30) break;
+      sleepSync(1500);
+    }
   }
-  return { loops, deleted };
+  return { loops, deleted, retries };
 }
 
 try {

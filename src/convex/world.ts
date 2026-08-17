@@ -306,11 +306,22 @@ async function stepRobot(
     }
   }
 
-  await ctx.db.patch(p._id, {
-    storageKg: pl.storageKg,
-    totalCollectedKg: pl.totalCollectedKg,
-    robot: r,
-  });
+  // Sprint 2.6 latency optimization: only persist when something actually
+  // changed. At 10k players most sharded robots are idle (no cluster in the
+  // pool), and an idle robot's doc is byte-identical every tick — writing
+  // ~2,000 no-op patches per tick was the dominant cost (~3.3 s/tick live).
+  // JSON.stringify is stable here: both sides derive from the same shape.
+  const changed =
+    pl.storageKg !== p.storageKg ||
+    pl.totalCollectedKg !== p.totalCollectedKg ||
+    JSON.stringify(r) !== JSON.stringify(p.robot);
+  if (changed) {
+    await ctx.db.patch(p._id, {
+      storageKg: pl.storageKg,
+      totalCollectedKg: pl.totalCollectedKg,
+      robot: r,
+    });
+  }
   // demand predicate shared with the harness (engine.ts robotDemands)
   return robotDemands(r.state);
 }

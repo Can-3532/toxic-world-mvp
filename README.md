@@ -155,31 +155,41 @@ bunx convex run harness:benchStatus       # counts + both invariant layers + dup
 #   bunx convex run harness:cleanupLoad '{"limit":500}'
 ```
 
-Results so far:
+Results (LIVE on `jovial-chickadee-617`, usage limit re-enabled, full sequence
+cleanup → reset → concurrency → 10/100/1k/10k benches → audit → cleanup → reset):
 - **Headless engine suite: ALL PASS** (`bun test tests/` — 55 tests / 179
-  assertions), including the 10-scenario Sprint 2.4/2.5 harness and the 10k-
-  player scale sim (invariant holds at every scale; 10k headless tick ≈ 55 ms).
-- **Concurrency (previous session): ALL PASS.** 5 concurrent unthrottled ticks:
-  every advance added exactly `+genPerTick` (exact-multiple accounting — no
-  lost update, no double apply); 3 concurrent guarded ticks: never two advances
-  per 1.6 s guard window. Convex's serializable isolation + automatic conflict
-  retry makes the non-atomic guard safe — **no guard fix needed**.
-- **Load 10 / 100 / 1,000 (previous session): PASS** live (tick p50: <1 ms /
-  95 ms / 709 ms). Both invariant layers ~1e-9, 0 duplicate reservations,
-  reward keys unique, `genPerTick` exact.
-- **10,000 players — findings:** (1) tick exceeded Convex's 4,096
-  DB-op-per-mutation limit → **sharded robot simulation**
-  (`WORLD.ROBOTS_PER_TICK = 2500`); (2) Sprint 2.6 continuation added
-  **sharded burn processing** (same round-robin; a 10k tick would otherwise do
-  ~6.5k writes: 2,500 robot + ~2,000 burn patches + ~2,000 ledger inserts — the
-  burn shard keeps it ≈ 3.5k) and fixed the **advanceBurn idempotency contract**
-  (a stale duplicate slice now advances `sliceIndex`, so a session can never be
-  locked out of TOX). (3) the live 10k re-run and the new live concurrency
-  re-run are **still blocked**: the deployment is DISABLED for exceeding the
-  free-tier usage limit. Raise/reset the limit in the Convex dashboard
-  (deployment `jovial-chickadee-617`), then: cleanup stranded players →
-  `bunx convex run harness:resetWorld` → `bun tests/liveConcurrency.ts` →
-  `bun tests/liveBench.ts 10000 5 0.5 0.05` → cleanup again.
+  assertions), including the 10k-player scale sim (invariant holds at every
+  scale; 10k headless tick ≈ 55 ms).
+- **Concurrency: PASS (live).** 5 concurrent unthrottled `tickOnce` — all 5
+  advanced, `genDelta = 7 × genPerTick` EXACT (5 ours + 2 cron): no lost
+  update, no double apply. 3 concurrent guarded `world:tick` — **0 advanced**
+  (all blocked by the fresh guard; only the cron's legitimate 1 advance in the
+  4.3 s window). Double-advance is impossible; **no guard fix needed**.
+- **Correctness at every scale: PASS.** 10 / 100 / 1,000 / 10,000 players —
+  both invariant layers at machine precision (~1e-8 kg), `dupReservations = 0`,
+  `reservationMismatch = 0`, ledger keys unique, `genPerTick` exact.
+- **Load 10 / 100:** PASS — tick p50 476 ms / 352 ms, p95 664 ms / 959 ms.
+- **Load 1,000:** correctness PASS — p50 1.86 s, p95 3.34 s. (The previous
+  session's "709 ms @ 1k" does NOT reproduce on this deployment; dev
+  deployments are slow per-doc.)
+- **Load 10,000 — performance target NOT MET:** 6/6 ticks succeeded with NO
+  write-limit errors and NO mutation failures, but tick = **2.8–3.8 s**
+  (p50 ≈ 3.4 s, p95/p99 ≈ 3.8 s) vs the < 1 s MVP benchmark. A no-op-write
+  skip for unchanged robots (Sprint 2.6 continuation) moved p50 3.4 → 3.1 s
+  (kept — fewer writes, less quota pressure) but the cost is dominated by
+  Convex dev-deployment per-doc read/write overhead (~10k doc reads + ~800
+  writes per tick). Consequence: cron drift at 10k (tick > 2 s cron interval,
+  world advances at ~60 % real-time). Paths to < 1 s: prod (non-dev)
+  deployment, or splitting the tick into parallel per-shard mutations.
+- **Stability: PASS.** 6 consecutive 10k ticks: 2.8–3.8 s, skew ~1e-8 every
+  tick, no drift, no quota spike, no failed mutation. Post-cleanup audit back
+  at machine precision; `resetWorld` restores the pristine 50% baseline.
+- **Tooling fixes during the run:** `cleanupLoad` now respects the 4,096-write
+  budget (10k players × ledger rows would exceed it) and only removes the
+  synthetic user when truly done; the live drivers pass args positionally
+  (this CLI has no `--args`) and retry cleanup on the cron's
+  `OptimisticConcurrencyControlFailure` (the world-doc patch races the 2 s
+  cron — the mutation is atomic, so retry with backoff is safe).
 
 ### Sprint 2.5 — production consistency & clean world
 
