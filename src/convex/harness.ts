@@ -1,15 +1,19 @@
 // TOXIC WORLD — PRODUCTION ENGINE TEST HARNESS (Sprint 2.4 audit, Sprint 2.5
-// clean-world tooling). Read-only live audit against the deployed engine; the
-// heavy automated scenarios live in tests/engineSim.ts + tests/engine.test.ts
-// (headless oracle driven by the same pure engine module).
+// clean-world tooling, Sprint 2.6 load/concurrency). Read-only live audit
+// against the deployed engine; the heavy automated scenarios live in
+// tests/engineSim.ts + tests/engine.test.ts (headless oracle driven by the
+// same pure engine module) and the live drivers live in tests/liveBench.ts +
+// tests/liveConcurrency.ts.
 //
 // Usage:
-//   bunx convex run harness:invariantAudit    — two-layer invariant on live DB
-//   bunx convex run harness:reanchorInvariant — one-time legacy repair (2.4)
-//   bunx convex run harness:resetWorld        — pristine World 0 baseline (2.5)
+//   bunx convex run harness:invariantAudit      — two-layer invariant on live DB
+//   bunx convex run harness:reanchorInvariant   — one-time legacy repair (2.4)
+//   bunx convex run harness:resetWorld          — pristine World 0 baseline (2.5)
+//   bunx convex run harness:concurrencyProbe    — tick-guard atomicity (2.6)
 
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { api } from "./_generated/api";
 import { checkWasteInvariant, pollutionFrac } from "./engine";
 import { batteryCap } from "./game";
 import { BURN_ZONE, BURN_ZONE_MULTIPLIER, UPGRADES, WORLD } from "./gameParams";
@@ -494,7 +498,49 @@ export const worldStateProbe = query({
           pollutionKg: world.pollutionKg,
           lastTick: world.lastTick,
           worldId: world.worldId,
+          generationRateKgH: world.generationRateKgH,
+          tickIndex: world.tickIndex ?? 0,
+          activePlayers: world.activePlayers,
         }
-      : { generatedKg: 0, pollutionKg: 0, lastTick: 0, worldId: 0 };
+      : {
+          generatedKg: 0,
+          pollutionKg: 0,
+          lastTick: 0,
+          worldId: 0,
+          generationRateKgH: 0,
+          tickIndex: 0,
+          activePlayers: 0,
+        };
+  },
+});
+
+/**
+ * SPRINT 2.6 — TICK-GUARD ATOMICITY PROBE (the "most important second test").
+ * Fires `n` guarded `world:tick` mutations CONCURRENTLY as separate
+ * transactions. Under Convex serializable isolation + automatic conflict
+ * retry, at most one can advance per guard window: the first commits
+ * `lastTick`, the others conflict-retry, re-read the fresh snapshot, and the
+ * rate-limit guard returns { advanced: false }. The probe itself writes
+ * nothing, so it cannot conflict with or re-run the nested ticks.
+ *
+ * Usage:  bunx convex run harness:concurrencyProbe '{"n":5}'
+ */
+export const concurrencyProbe = mutation({
+  args: { n: v.optional(v.number()) },
+  handler: async (
+    ctx,
+    { n = 5 },
+  ): Promise<{
+    n: number;
+    advanced: number;
+    results: { advanced: boolean; tickMs: number }[];
+  }> => {
+    // explicit annotations break the circular inference through the generated
+    // `api` object (which includes this function itself)
+    const results: { advanced: boolean; tickMs: number }[] = await Promise.all(
+      Array.from({ length: n }, () => ctx.runMutation(api.world.tick)),
+    );
+    const advanced = results.filter((r) => r.advanced).length;
+    return { n, advanced, results };
   },
 });

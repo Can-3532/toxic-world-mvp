@@ -1,168 +1,148 @@
-// TOXIC WORLD — SPRINT 2.6 LIVE-DB LOAD BENCHMARK DRIVER.
+// TOXIC WORLD — Sprint 2.6 LIVE-DB LOAD & CONCURRENCY BENCHMARK DRIVER.
 //
-// Drives the REAL Convex deployment (not the headless sim): seeds synthetic
-// players, runs back-to-back unthrottled ticks (`harness:tickOnce`), records
-// engine tick time (user code + DB ops, returned by the mutation) plus wall
-// time, and reads `harness:benchStatus` for invariants / duplicate checks.
+// Seeds synthetic players on the REAL Convex deployment, drives unthrottled
+// ticks, measures latency (p50/p95/p99), audits both invariant layers,
+// duplicate reservations and reward-key uniqueness, then cleans up.
 //
-// Usage:
-//   bun tests/liveBench.ts <scale> <ticks> [activeFraction] [queueFraction]
-//   e.g. bun tests/liveBench.ts 10000 8 0.5 0.05
+// Usage (from project root, quota-frugal — always clean up immediately):
+//   bun tests/liveBench.ts 1000 5 0.5 0.3 0.2      # count ticks active storage queue
+//   bun tests/liveBench.ts 10000 5 0.5 0.05 0.05   # 10k (watch the op budget)
+//   bun tests/liveBench.ts 100 3 --no-reset        # no clean-world reset first
+//
+// Exit code: 0 PASS, 1 ERROR (deployment unreachable / seed failure),
+//            2 FAIL (invariant or reservation checks failed).
 
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
-const scale = Number(process.argv[2] ?? 10);
-const ticks = Number(process.argv[3] ?? 8);
-const activeFraction = Number(process.argv[4] ?? 0.5);
-const queueFraction = Number(process.argv[5] ?? (scale >= 10000 ? 0.05 : 0.2));
-const SEED_BATCH = scale > 2000 ? 2000 : scale;
+const [countRaw = "1000", ticksRaw = "5", activeRaw = "0.5", storageRaw = "0.3", queueRaw = "0.2", ...rest] =
+  process.argv.slice(2);
+const noReset = rest.includes("--no-reset");
+const count = Number(countRaw);
+const ticks = Number(ticksRaw);
+const activeFraction = Number(activeRaw);
+const storageFraction = Number(storageRaw);
+const queueFraction = Number(queueRaw);
 
-function convexRun(fn: string, args?: unknown): { json: any; ok: boolean; raw: string } {
-  const argv = ["x", "convex", "run", fn];
-  if (args !== undefined) argv.push(JSON.stringify(args));
-  const r = spawnSync("bun", argv, { encoding: "utf8", timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
-  let json: any = null;
-  const out = (r.stdout || "").trim();
-  try {
-    json = JSON.parse(out);
-  } catch {
-    const m = out.match(/\{[\s\S]*\}/);
-    if (m) {
-      try {
-        json = JSON.parse(m[0]);
-      } catch {
-        /* keep null */
-      }
-    }
-  }
-  return { json, ok: r.status === 0 && !!json, raw: (out || r.stderr || "").slice(0, 500) };
+const CHUNK = 2000;
+const CLEANUP_LIMIT = 500;
+
+function parseJson(out: string): any {
+  const s = out.indexOf("{");
+  const e = out.lastIndexOf("}");
+  if (s < 0 || e < 0) throw new Error(`no JSON in convex output:\n${out}`);
+  return JSON.parse(out.slice(s, e + 1));
 }
 
-function pct(sorted: number[], p: number): number {
-  if (sorted.length === 0) return NaN;
-  const i = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
-  return sorted[i];
-}
-
-const t0 = Date.now();
-const log = (...a: unknown[]) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...a);
-
-log(`=== LIVE LOAD TEST scale=${scale} ticks=${ticks} active=${activeFraction} queueFrac=${queueFraction} ===`);
-
-// 1) cleanup any leftovers, then reset to a pristine world so both invariant
-//    layers start at exactly 0 (benchmarks run on the clean baseline)
-for (let i = 0; i < 60; i++) {
-  const r = convexRun("harness:cleanupLoad", { limit: 500 });
-  if (!r.ok) break;
-  if (r.json?.playersDeleted === 0) break;
-}
-convexRun("harness:resetWorld");
-
-// 2) seed in chunks
-const batches = Math.ceil(scale / SEED_BATCH);
-let seeded = 0;
-for (let i = 0; i < batches; i++) {
-  const n = Math.min(SEED_BATCH, scale - i * SEED_BATCH);
-  const r = convexRun("harness:seedLoad", {
-    count: n,
-    activeFraction,
-    storageFraction: 0.3,
-    queueFraction,
+function convexRun(fn: string, args?: Record<string, unknown>): any {
+  const argv = ["convex", "run", fn];
+  if (args) argv.push("--args", JSON.stringify(args));
+  const out = execFileSync("bunx", argv, {
+    encoding: "utf8",
+    timeout: 150_000,
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  if (!r.ok) {
-    log("SEED FAIL:", r.raw);
-    process.exit(1);
+  return parseJson(out);
+}
+
+function percentile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+}
+
+const report: Record<string, unknown> = {
+  count,
+  ticks,
+  activeFraction,
+  storageFraction,
+  queueFraction,
+  startedAt: new Date().toISOString(),
+};
+
+function cleanup(): { loops: number; deleted: number } {
+  let loops = 0;
+  let deleted = 0;
+  while (loops < 200) {
+    const r = convexRun("harness:cleanupLoad", { limit: CLEANUP_LIMIT });
+    deleted += r.playersDeleted;
+    loops++;
+    if (r.playersDeleted === 0) break;
   }
-  seeded += r.json.created;
+  return { loops, deleted };
 }
-log(`seeded ${seeded} synthetic players`);
 
-// 3) warmup tick (compiles + moves robots out of idle)
-convexRun("harness:tickOnce");
-
-// 4) measured ticks
-const tickMs: number[] = [];
-const wallMs: number[] = [];
-let failures = 0;
-const first = convexRun("harness:tickOnce");
-let last = first;
-for (let i = 0; i < ticks; i++) {
-  const w0 = performance.now();
-  const r = convexRun("harness:tickOnce");
-  const wall = performance.now() - w0;
-  if (!r.ok || r.json?.advanced !== true) {
-    failures++;
-    log(`TICK ${i} FAIL:`, r.raw);
-    continue;
+try {
+  // 1) clean-world baseline (unless --no-reset)
+  if (!noReset) {
+    const r = convexRun("harness:resetWorld");
+    report.reset = {
+      worldId: r.worldId,
+      pollutionFrac: r.pollutionFrac,
+      invariantSkewKg: r.invariantSkewKg,
+    };
   }
-  tickMs.push(r.json.tickMs);
-  wallMs.push(wall);
-  last = r;
+
+  // 2) seed in chunks (each mutation stays under the write budget)
+  let created = 0;
+  for (let i = 0; i < count; i += CHUNK) {
+    const r = convexRun("harness:seedLoad", {
+      count: Math.min(CHUNK, count - i),
+      activeFraction,
+      storageFraction,
+      queueFraction,
+    });
+    created += r.created;
+  }
+  report.seeded = created;
+
+  // 3) warmup tick (first tick pays cold-start cost, excluded from stats)
+  convexRun("harness:tickOnce");
+
+  // 4) measured ticks
+  const latencies: number[] = [];
+  for (let i = 0; i < ticks; i++) {
+    const r = convexRun("harness:tickOnce");
+    latencies.push(r.tickMs);
+  }
+  latencies.sort((a, b) => a - b);
+  report.tickLatencyMs = {
+    samples: latencies.length,
+    p50: percentile(latencies, 0.5),
+    p95: percentile(latencies, 0.95),
+    p99: percentile(latencies, 0.99),
+    max: latencies[latencies.length - 1] ?? 0,
+    avg: latencies.length
+      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+      : 0,
+  };
+
+  // 5) live audit
+  const status = convexRun("harness:benchStatus");
+  report.status = status;
+
+  const invariantPass =
+    Math.abs(status.massBalance) < 0.1 && Math.abs(status.poolBalance) < 0.1;
+  const reservationPass =
+    status.dupReservations === 0 && status.reservationMismatch === 0;
+  const ledgerPass = status.ledgerSample.uniqueKeys === status.ledgerSample.rows;
+  const pass = invariantPass && reservationPass && ledgerPass;
+  report.pass = pass;
+  report.checks = {
+    invariantPass,
+    reservationPass,
+    ledgerPass,
+  };
+
+  // 6) cleanup (always — even on failed checks)
+  report.cleanup = cleanup();
+} catch (e: any) {
+  report.error = String(e?.message ?? e);
+  try {
+    report.cleanup = cleanup();
+  } catch {
+    // deployment may be unreachable — cleanup is best-effort
+  }
+} finally {
+  report.finishedAt = new Date().toISOString();
+  console.log(JSON.stringify(report, null, 2));
+  process.exit(report.error ? 1 : report.pass ? 0 : 2);
 }
-const sorted = [...tickMs].sort((a, b) => a - b);
-const wSorted = [...wallMs].sort((a, b) => a - b);
-
-// 5) status + progression
-const status = convexRun("harness:benchStatus").json ?? {};
-const genDelta = (last.json?.world?.generatedKg ?? 0) - (first.json?.world?.generatedKg ?? 0);
-const polDelta = (last.json?.world?.pollutionKg ?? 0) - (first.json?.world?.pollutionKg ?? 0);
-const genPerTick = genDelta / Math.max(1, tickMs.length);
-const expectedGenPerTick = (status.activeBases ?? 0) * 50 * (1 / 60);
-
-// 6) cleanup
-let deleted = 0;
-for (let i = 0; i < 120; i++) {
-  const r = convexRun("harness:cleanupLoad", { limit: 500 });
-  if (!r.ok) break;
-  deleted += r.json?.playersDeleted ?? 0;
-  if ((r.json?.playersDeleted ?? 1) === 0) break;
-}
-
-// 7) report
-console.log("\n=== RESULTS ===");
-console.log(JSON.stringify(
-  {
-    scale,
-    ticks: tickMs.length,
-    failures,
-    tickMs: {
-      mean: tickMs.reduce((a, b) => a + b, 0) / Math.max(1, tickMs.length),
-      min: sorted[0],
-      p50: pct(sorted, 0.5),
-      p95: pct(sorted, 0.95),
-      p99: pct(sorted, 0.99),
-      max: sorted[sorted.length - 1],
-    },
-    wallMs: {
-      mean: wallMs.reduce((a, b) => a + b, 0) / Math.max(1, wallMs.length),
-      p50: pct(wSorted, 0.5),
-      p95: pct(wSorted, 0.95),
-    },
-    progression: {
-      generatedKgDelta: genDelta,
-      genPerTickMeasured: genPerTick,
-      genPerTickExpected: expectedGenPerTick,
-      pollutionKgDelta: polDelta,
-    },
-    db: {
-      players: status.players,
-      syntheticPlayers: status.syntheticPlayers,
-      activeBases: status.activeBases,
-      autoRobots: status.autoRobots,
-      clusters: status.clusters,
-      storageKg: status.storageKg,
-      queuedKg: status.queuedKg,
-    },
-    integrity: {
-      massBalance: status.massBalance,
-      poolBalance: status.poolBalance,
-      skewKg: status.skewKg,
-      dupReservations: status.dupReservations,
-      reservationMismatch: status.reservationMismatch,
-      ledgerSample: status.ledgerSample,
-    },
-    cleanup: { deleted },
-  },
-  null,
-  2,
-));

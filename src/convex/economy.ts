@@ -58,19 +58,23 @@ export function computeBurnSlice(
 /**
  * Advance the burner state after a slice.
  * - Normal case (not yet rewarded): credit + sliceIndex++.
- * - alreadyRewarded (duplicate tick / ledger key exists): burn the kg from the
- *   queue WITHOUT crediting, but still advance sliceIndex so the next slice
- *   gets a fresh key — this is what makes concurrent double-ticks harmless.
+ * - alreadyRewarded (duplicate tick / ledger key already exists): burn the kg
+ *   from the queue WITHOUT crediting, but STILL advance sliceIndex so the next
+ *   slice gets a fresh key — this is what makes concurrent double-ticks
+ *   harmless. (FIXED in Sprint 2.6: the previous code kept sliceIndex pinned on
+ *   a duplicate, so one stale replay would lock the whole session out of TOX
+ *   forever.)
  */
 export function advanceBurn(
   state: BurnSlice,
   burnKg: number,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   alreadyRewarded: boolean,
 ): BurnSlice {
   return {
     sessionId: state.sessionId,
     queuedKg: Math.max(0, state.queuedKg - burnKg),
-    sliceIndex: alreadyRewarded ? state.sliceIndex : state.sliceIndex + 1,
+    sliceIndex: state.sliceIndex + 1,
   };
 }
 

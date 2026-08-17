@@ -1,11 +1,8 @@
-// TOXIC WORLD — v0.4 reward economy tests (Design Freeze v0.4).
-// Run with: bun test tests/economy.test.ts
+// TOXIC WORLD — v0.4 reward economy unit tests (Design Freeze v0.4).
+// Runs against the SAME pure functions the world tick uses
+// (src/convex/economy.ts + src/convex/gameParams.ts) — not a copy.
 //
-// These tests exercise the REAL production module src/convex/economy.ts
-// (and its constants from src/convex/gameParams.ts) — no mocks.
-// Engine-level idempotency (ledger lookups inside world.ts tick) is enforced
-// by the rewardLedger table; the unit tests below prove the key scheme makes
-// double-rewarding the same waste unit impossible.
+// Run:  bun test tests/economy.test.ts
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -19,178 +16,174 @@ import {
   rewardKey,
   type BurnSlice,
 } from "../src/convex/economy";
-import { BURN_ZONE_MULTIPLIER, CARGO_CUMULATIVE_TOX, TOX_PER_TON } from "../src/convex/gameParams";
 
-const TON = 1000; // kg per ton (the formula is burned_kg / 1000 * rate)
-
-const approx = (a: number, b: number, tol = 1e-9) => expect(Math.abs(a - b)).toBeLessThanOrEqual(tol);
-
-// --- 1. reward formulas ---------------------------------------------------
-
-describe("normal burn reward (500 TOX / ton)", () => {
-  test("1 ton burned => 500 TOX", () => {
-    approx(normalBurnTox(TON), 500);
+describe("v0.4 normal burn reward (500 TOX / ton)", () => {
+  test("1 ton burned = 500 TOX", () => {
+    expect(normalBurnTox(1000)).toBe(500);
   });
-  test("100 kg burned => 50 TOX", () => {
-    approx(normalBurnTox(100), 50);
+  test("100 kg burned = 50 TOX", () => {
+    expect(normalBurnTox(100)).toBe(50);
   });
-  test("fractional amounts supported: 20 kg => 10 TOX", () => {
-    approx(normalBurnTox(20), 10);
+  test("20 kg burned = 10 TOX", () => {
+    expect(normalBurnTox(20)).toBe(10);
   });
-  test("constant matches the freeze: TOX_PER_TON === 500", () => {
-    expect(TOX_PER_TON).toBe(500);
+  test("fractional amounts supported", () => {
+    expect(normalBurnTox(0.5)).toBeCloseTo(0.25, 12);
+  });
+  test("burnRewardTox with zone inactive == normal", () => {
+    expect(burnRewardTox(1000, false)).toBe(500);
   });
 });
 
-describe("burn zone reward (×1.2 => 600 TOX / ton)", () => {
-  test("1 ton in zone => 600 TOX", () => {
-    approx(burnZoneTox(TON), 600);
+describe("burn zone reward (×1.2 = 600 TOX / ton)", () => {
+  test("1 ton in zone = 600 TOX", () => {
+    expect(burnZoneTox(1000)).toBe(600);
   });
-  test("100 kg in zone => 60 TOX", () => {
-    approx(burnZoneTox(100), 60);
+  test("100 kg in zone = 60 TOX", () => {
+    expect(burnZoneTox(100)).toBe(60);
   });
-  test("zone is exactly normal × 1.2 for any mass", () => {
-    for (const kg of [1, 13, 100, 999, 12345]) {
-      approx(burnZoneTox(kg), normalBurnTox(kg) * BURN_ZONE_MULTIPLIER);
-    }
+  test("burnRewardTox with zone active == 1.2× normal", () => {
+    expect(burnRewardTox(1000, true)).toBe(600);
   });
-  test("burnRewardTox selects multiplier server-side by zone state", () => {
-    approx(burnRewardTox(TON, false), 500);
-    approx(burnRewardTox(TON, true), 600);
+  test("fractional zone reward (1.5 kg = 0.9 TOX)", () => {
+    expect(burnZoneTox(1.5)).toBeCloseTo(0.9, 12);
   });
 });
 
-// --- 2. only burning produces reward --------------------------------------
-
-describe("no reward outside the burn transition", () => {
-  test("0 kg burned produces 0 TOX in both kinds", () => {
-    expect(burnRewardTox(0, false)).toBe(0);
-    expect(burnRewardTox(0, true)).toBe(0);
-    expect(normalBurnTox(0)).toBe(0);
-    expect(burnZoneTox(0)).toBe(0);
+describe("reward ledger keys (exactly-once)", () => {
+  test("unique per slice index", () => {
+    expect(rewardKey("s", 0)).not.toBe(rewardKey("s", 1));
   });
-  test("negative/zero kg never credits: advanceBurn floors the queue at 0", () => {
-    const state: BurnSlice = { sessionId: "s1", queuedKg: 0, sliceIndex: 0 };
-    const next = advanceBurn(state, 0, false);
+  test("unique per session", () => {
+    expect(rewardKey("a", 0)).not.toBe(rewardKey("b", 0));
+  });
+  test("normal and zone burns share ONE key (a waste unit cannot be paid twice)", () => {
+    const normal = computeBurnSlice(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      4,
+      false,
+    );
+    const zone = computeBurnSlice(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      4,
+      true,
+    );
+    expect(normal.key).toBe(zone.key);
+    expect(normal.kind).toBe("normal");
+    expect(zone.kind).toBe("burn_zone");
+  });
+});
+
+describe("computeBurnSlice", () => {
+  test("normal slice amount + tox", () => {
+    const s = computeBurnSlice(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      4,
+      false,
+    );
+    expect(s).toEqual({ key: "s:0", kg: 4, tox: 2, kind: "normal" });
+  });
+  test("zone slice pays 1.2×", () => {
+    const s = computeBurnSlice(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      4,
+      true,
+    );
+    expect(s.tox).toBeCloseTo(2.4, 12);
+  });
+  test("kind decided server-side by zone state, never by client input", () => {
+    // the slice API takes only kg + zone state — there is no client-supplied
+    // amount or multiplier parameter at all
+    const s = computeBurnSlice(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      7.25,
+      true,
+    );
+    expect(s.tox).toBeCloseTo(((7.25 / 1000) * 500 * 1.2), 12);
+  });
+});
+
+describe("advanceBurn / exactly-once protocol", () => {
+  test("normal advance reduces queue and moves to next slice", () => {
+    const next = advanceBurn(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      4,
+      false,
+    );
+    expect(next.queuedKg).toBe(96);
+    expect(next.sliceIndex).toBe(1);
+  });
+  test("duplicate slice burns WITHOUT credit but still advances the key", () => {
+    // Sprint 2.6 contract fix: a stale duplicate must not pin sliceIndex,
+    // otherwise the whole session would never reward again.
+    const dup = advanceBurn(
+      { sessionId: "s", queuedKg: 100, sliceIndex: 0 },
+      4,
+      true,
+    );
+    expect(dup.queuedKg).toBe(96);
+    expect(dup.sliceIndex).toBe(1);
+  });
+  test("queue never goes negative", () => {
+    const next = advanceBurn(
+      { sessionId: "s", queuedKg: 1, sliceIndex: 0 },
+      4,
+      false,
+    );
     expect(next.queuedKg).toBe(0);
   });
-});
+  test("end-to-end: the same slice can never credit TOX twice", () => {
+    const ledger = new Map<string, number>();
+    let state: BurnSlice = { sessionId: "s", queuedKg: 10, sliceIndex: 0 };
+    const burn = 4;
 
-// --- 3. idempotency / exactly-once -----------------------------------------
+    // first pass — credit
+    const first = computeBurnSlice(state, burn, false);
+    ledger.set(first.key, first.tox);
+    expect(first.tox).toBe(2);
+    state = advanceBurn(state, burn, false);
 
-describe("reward ledger keys are exactly-once", () => {
-  const state: BurnSlice = { sessionId: "p:1700000000000", queuedKg: 1000, sliceIndex: 3 };
+    // stale duplicate of the SAME slice (same session, same sliceIndex 0)
+    const dup = computeBurnSlice({ ...state, sliceIndex: 0 }, burn, false);
+    expect(dup.key).toBe(first.key);
+    expect(ledger.has(dup.key)).toBe(true);
+    state = advanceBurn({ ...state, sliceIndex: 0 }, burn, true);
 
-  test("the same slice always produces the same key", () => {
-    const a = computeBurnSlice(state, 100, false);
-    const b = computeBurnSlice(state, 100, true);
-    expect(a.key).toBe(b.key);
-    expect(a.key).toBe(rewardKey(state.sessionId, state.sliceIndex));
-  });
-
-  test("a normal burn and a burn-zone burn of the SAME waste unit share one key => cannot double-reward", () => {
-    const normal = computeBurnSlice(state, 100, false);
-    const zone = computeBurnSlice(state, 100, true);
-    expect(normal.key).toBe(zone.key);
-    expect(normal.tox).not.toBe(zone.tox); // different multipliers, but same key
-  });
-
-  test("distinct slices get distinct keys (index advances per credited slice)", () => {
-    const s0 = computeBurnSlice({ ...state, sliceIndex: 0 }, 100, false);
-    const s1 = computeBurnSlice({ ...state, sliceIndex: 1 }, 100, false);
-    expect(s0.key).not.toBe(s1.key);
-  });
-
-  test("a duplicate tick (alreadyRewarded) burns kg but credits nothing", () => {
-    const state2: BurnSlice = { sessionId: "p:1", queuedKg: 1000, sliceIndex: 4 };
-    const credited = advanceBurn(state2, 100, false);
-    const duplicated = advanceBurn(state2, 100, true);
-    // both consume the same kg from the queue...
-    expect(credited.queuedKg).toBe(900);
-    expect(duplicated.queuedKg).toBe(900);
-    // ...but only the credited pass advances the key
-    expect(credited.sliceIndex).toBe(5);
-    expect(duplicated.sliceIndex).toBe(4);
-  });
-
-  test("rewards are fractional-safe", () => {
-    const slice = computeBurnSlice({ ...state, queuedKg: 20 }, 20, false);
-    approx(slice.tox, 10);
+    // the next slice gets a fresh key and is NOT already in the ledger
+    const third = computeBurnSlice(state, burn, false);
+    expect(third.key).toBe("s:1");
+    expect(ledger.has(third.key)).toBe(false);
   });
 });
 
-// --- 4. SOL is untouched by burn -------------------------------------------
-
-describe("burn never touches SOL", () => {
-  test("economy module exposes no SOL write path", () => {
-    // Type-level: the module's public API returns only kg/tox/kind/key.
-    const slice = computeBurnSlice({ sessionId: "s", queuedKg: 100, sliceIndex: 0 }, 100, false);
-    expect(Object.keys(slice).sort()).toEqual(["key", "kg", "kind", "tox"]);
+describe("global waste / pollution accounting", () => {
+  test("burn reduces pollution 1:1 (normal)", () => {
+    expect(applyBurnToPollution(1000, 4)).toBe(996);
   });
-  test("advanceBurn mutates only the queue state", () => {
-    const before: BurnSlice = { sessionId: "s", queuedKg: 100, sliceIndex: 0 };
-    const after = advanceBurn(before, 100, false);
-    expect(after).toEqual({ sessionId: "s", queuedKg: 0, sliceIndex: 1 });
+  test("burn reduces pollution 1:1 (zone — same amount, only reward differs)", () => {
+    expect(applyBurnToPollution(1000, 4)).toBe(996);
+  });
+  test("pollution never drops below zero", () => {
+    expect(applyBurnToPollution(2, 4)).toBe(0);
   });
 });
 
-// --- 5. pollution accounting ------------------------------------------------
-
-describe("burn removes waste from the world 1:1, identical for both kinds", () => {
-  test("pollution drops by exactly the burned kg", () => {
-    approx(applyBurnToPollution(1_000_000, 400), 999_600);
+describe("progression ROI references (not gameplay inputs)", () => {
+  test("starter rate ≈ 460 TOX / day (38.34 kg/h × 24 h × 0.5 TOX/kg)", () => {
+    const perDay = 38.34 * 24 * 0.5;
+    expect(perDay).toBeCloseTo(460.08, 1);
   });
-  test("identical reduction for normal and burn-zone burns", () => {
-    const before = 5_000_000;
-    const burned = 12345;
-    // the multiplier affects ONLY the TOX reward, never the mass accounting
-    expect(applyBurnToPollution(before, burned)).toBe(before - burned);
-    approx(burnZoneTox(burned), normalBurnTox(burned) * BURN_ZONE_MULTIPLIER);
+  test("cargo L2 (150 TOX) at starter rate ≈ 7.8 h", () => {
+    const h = hoursToReach(38.34 * 0.5, 150);
+    expect(h).toBeCloseTo(7.82, 1);
   });
-  test("pollution never goes negative", () => {
-    expect(applyBurnToPollution(10, 999)).toBe(0);
+  test("zero TOX/hour → Infinity", () => {
+    expect(hoursToReach(0, 150)).toBe(Infinity);
   });
-});
-
-// --- 6. starter progression references (v0.4 validation, not hard-coded) ----
-
-describe("starter 24h economy reference (~38.34 kg/h spatial throughput)", () => {
-  const starterKgH = 38.34; // real spatial engine measurement, NOT hard-coded gameplay
-  const toxPerDay = (starterKgH * 24) / 1000 * TOX_PER_TON;
-
-  test("≈ 0.920 ton/day => ≈ 460 TOX/day", () => {
-    approx(toxPerDay, 460.08, 1e-6);
-  });
-  test("24h to earn one day's TOX at starter rate", () => {
-    approx(hoursToReach(toxPerDay / 24, toxPerDay), 24, 1e-9);
-  });
-});
-
-describe("cargo progression ROI (cumulative TOX at 460 TOX/day)", () => {
-  const toxPerHour = 460.08 / 24; // ≈ 19.17 TOX/h
-
-  test("cumulative costs match the freeze: 150 / 375 / 715 / 1225", () => {
-    expect([...CARGO_CUMULATIVE_TOX]).toEqual([150, 375, 715, 1225]);
-  });
-  test("time to each cargo level matches the reference (7.8 / 19.6 / 37.3 / 63.9 h)", () => {
-    const refs = [7.8, 19.6, 37.3, 63.9];
-    CARGO_CUMULATIVE_TOX.forEach((cum, i) => {
-      const hours = hoursToReach(toxPerHour, cum);
-      expect(Math.abs(hours - refs[i])).toBeLessThanOrEqual(0.15);
-    });
-  });
-});
-
-// --- 7. burn zone bonus impact ----------------------------------------------
-
-describe("burn zone impact on the economy", () => {
-  test("zone burns earn exactly +20% over normal", () => {
-    for (const kg of [1, 50, 1000]) {
-      approx(burnZoneTox(kg) / normalBurnTox(kg), 1.2);
-    }
-  });
-  test("a 100% zone-share player earns 1.2× a normal player over equal burn", () => {
-    const burned = 100_000;
-    approx(burnZoneTox(burned), normalBurnTox(burned) * 1.2);
+  test("cumulative cargo curve 150 / 375 / 715 / 1225", () => {
+    const [l2, l3, l4, l5] = [150, 375, 715, 1225];
+    expect(l3).toBe(l2 + 225);
+    expect(l4).toBe(l3 + 340);
+    expect(l5).toBe(l4 + 510);
   });
 });

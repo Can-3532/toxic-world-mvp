@@ -496,8 +496,14 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
 
     // 6) processing / burning → TOX-only rewards (v0.4)
     let burnedKg = world.burnedKg;
-    for (const p of players) {
+    for (const [i, p] of players.entries()) {
       if (p.processing.queuedKg <= 0) continue;
+      // Sprint 2.6 write-budget sharding: burn only this tick's shard (same
+      // round-robin as the robots). Worlds ≤ ROBOTS_PER_TICK (shardCount 1)
+      // are byte-for-byte unchanged; larger worlds burn each queue once every
+      // shardCount ticks so the per-mutation write budget stays under Convex's
+      // 4,096-write limit at 10k players (~2,500 robot + ~500 burn writes).
+      if (i % shardCount !== shardIndex) continue;
 
       // ensure a burn session exists (also migrates pre-v0.4 docs)
       const sessionId = p.processing.sessionId ?? `${p._id}:${p.processing.since || now}`;
