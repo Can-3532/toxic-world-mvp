@@ -106,8 +106,8 @@ UI, never in committed files. Real Solana vars (`COINBASE_COMMERCE_*`,
 ## Tests
 
 ```bash
-bun test tests/                 # all 58 tests (economy + engine harness)
-bun test tests/engine.test.ts   # Sprint 2.4 production engine test harness
+bun test tests/                 # all 64 tests (economy + engine harness)
+bun test tests/engine.test.ts   # production engine test harness (Sprint 2.4 + 2.5)
 bun test tests/economy.test.ts  # v0.4 reward formulas, idempotency, pollution accounting
 
 # Live invariant audit against the deployed Convex engine (read-only):
@@ -142,12 +142,37 @@ step-for-step. Coverage:
 bunx convex run harness:reanchorInvariant
 ```
 
+### Sprint 2.5 — production consistency & clean world
+
+1. **Batch Allocation production compliance** — the tick no longer assigns
+   clusters first-come-first-served: idle auto robots are matched to unclaimed
+   clusters once per tick via the SAME `batchAllocation` reference the harness
+   tests (`engine.ts`): ascending level order (L1 floor access), battery
+   feasibility, batch size 20, deterministic (level + id tie-break), no
+   duplicate reservation. Tests prove the production result equals the
+   reference on identical inputs.
+2. **Clean World** — `bunx convex run harness:resetWorld` re-seeds World 0
+   pristine (10,000 t capacity, 50% pollution, 10% collectable, generated 0,
+   burned 0, legacy residual 0) and wipes world/cluster/event/zone state +
+   player-held waste (accounts/balances/upgrades kept). All benchmarks run on
+   this baseline. This also fixes the pre-2.5 seed write-back bug that leaked
+   ~13.5 t of phantom pool mass (the "legacy drift" seen in Sprint 2.4).
+3. **Two-layer invariant spec** — the old single-equation physical invariant
+   is retired. Official accounting (verified live by `harness:invariantAudit`):
+   Layer 1 `seed + generated == pollution + burned`; Layer 2 `hidden +
+   collectable + clusters + cargo + storage + processing == pollution −
+   generated`, with the explicit note that pool buckets never double-count the
+   same mass. Collapse consistency: player-held waste is lost with the world
+   (balances/upgrades carry over), so Layer 2 stays exact on the reset.
+
 
 ## Status (honest)
 
 - **Real:** world engine (cron-driven every 2s), spatial robots, v0.4 TOX economy
-  with reward ledger + Burn Zones, persistence, auth, frontend, invariant
-  telemetry per tick (`world.invariantSkewKg`), live audit (`harness:invariantAudit`).
+  with reward ledger + Burn Zones, persistence, auth, frontend, two-layer
+  invariant telemetry per tick (`world.invariantSkewKg`), live audit
+  (`harness:invariantAudit`), Batch/Reservation production compliance, clean
+  world baseline (`harness:resetWorld`).
 - **Mock:** SOL balance (off-chain ledger) used only for the base purchase. No
   wallet, no Solana transaction.
 - **Not implemented:** real settlement, reward outbox for SOL payouts, protection

@@ -53,8 +53,26 @@ Plus `authTables()` system tables: `authAccounts`, `authSessions`,
 | `resetCount` | number | collapse counter |
 | `startedAt` | number | epoch ms |
 | `lastTick` | number | epoch ms; rate-limit guard for `tick` |
+| `seedPollutionKg` | number? | pollution at world start (invariant anchor, Sprint 2.4) |
+| `generatedKg` | number? | cumulative generation this cycle (Sprint 2.4) |
+| `invariantSkewKg` | number? | |mass-balance residual| after each tick (Sprint 2.4) |
 
 Indexes: none (single doc, fetched with `.first()`).
+
+**Waste accounting (Sprint 2.5 — official two-layer invariant, replaces the old
+single-equation physical invariant):**
+
+```
+Layer 1 — Primary Mass Invariant: seedPollutionKg + generatedKg == pollutionKg + burnedKg
+Layer 2 — Secondary Pool Invariant: hiddenKg + collectableKg + clusterKg + cargoKg
+          + storageKg + processingKg == pollutionKg − generatedKg
+```
+
+The pool buckets are DISJOINT holdings of the recoverable atmosphere — a kg in
+a robot's cargo is not also counted in a cluster, storage, or processing queue.
+Generated waste is not yet recoverable; burned waste has left the system.
+`harness:invariantAudit` reports both layers on the live DB; the clean baseline
+is restored by `harness:resetWorld`.
 
 ### `wasteClusters` — spatial materialization of the collectable pool
 | Field | Type | Notes |
@@ -83,7 +101,7 @@ Index: `by_world` (`worldId`).
 | `totalEarnedSol` | number? | **DEPRECATED (v0.3)** — never written after v0.4 |
 | `toxFromNormal` | number? | lifetime TOX from normal burns |
 | `toxFromZone` | number? | lifetime TOX from Burn Zone burns |
-| `storageKg` | number | waste held at base |
+| `storageKg` | number | waste held at base (zeroed on world collapse — Sprint 2.5) |
 | `processing` | object | `{ queuedKg, since, sessionId?, sliceIndex? }` — burner queue + idempotency state |
 | `levels` | object | `{ cargo, recharge, battery, storage }` each 1..5 |
 | `robot` | object | see below |

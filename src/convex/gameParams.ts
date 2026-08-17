@@ -36,6 +36,7 @@ export const WORLD = {
   MAX_CLUSTER_SPAWNS_PER_TICK: 25,
   PROCESSING_KG_PER_S: 2, // burn rate (kg / real second)
   DEMAND_REF_KG_H: 42, // starter robot throughput reference (kg / game hour)
+  BATCH_SIZE: 20, // Batch/Reservation: robots per allocation batch (Sprint 2.5)
 } as const;
 
 // --- v0.4 reward economy ---------------------------------------------

@@ -1,7 +1,8 @@
-// TOXIC WORLD — pure engine math (Sprint 2.4 test harness core).
-// No Convex imports on purpose: the SAME functions run inside the world tick
-// (`world.ts`) and in the headless tests (`tests/engine.test.ts`), so the
-// harness validates the real production formulas, not a copy.
+// TOXIC WORLD — pure engine math (Sprint 2.4 test harness core, Sprint 2.5
+// consistency spec). No Convex imports on purpose: the SAME functions run
+// inside the world tick (`world.ts`) and in the headless tests
+// (`tests/engine.test.ts`), so the harness validates the real production
+// formulas, not a copy.
 //
 // This module is the TS equivalent of the Python simulation oracle: the
 // design doc (Sprint 1) mandates that the simulation engine stays available
@@ -11,19 +12,25 @@
 import { REPLENISHMENT, WORLD } from "./gameParams";
 
 // ---------------------------------------------------------------------------
-// 1. Waste invariant (Global Waste accounting)
+// 1. Waste accounting — OFFICIAL TWO-LAYER INVARIANT (Backend Technical
+//    Specification, Sprint 2.5). This supersedes the old single-equation
+//    "physical invariant" (initial + generated == hidden + collectable +
+//    cargo + storage + processing + burned), which assumed generation flows
+//    directly into the pools and is formally RETIRED.
 // ---------------------------------------------------------------------------
 //
-// Mass balance: every kg that entered the world (seed + generation) is either
-// still in the atmosphere (pollution) or has been burned.
-//   pollutionKg + burnedKg == initialWasteKg + generatedKg
+//  LAYER 1 — PRIMARY MASS INVARIANT (what entered == what remains/left)
+//    seedPollutionKg + generatedKg == pollutionKg + burnedKg
 //
-// Pool conservation: the tracked recoverable pools (hidden + collectable +
-// materialized clusters + player-held cargo/storage/processing) must equal
-// the recoverable portion of the atmosphere (pollution − generated), because
-// generation is not yet recoverable and burned waste left the system.
-//   hidden + collectable + clusters + cargo + storage + processing
-//     == pollutionKg − generatedKg
+//  LAYER 2 — SECONDARY POOL INVARIANT (recoverable holdings partition the
+//    recoverable portion of the atmosphere; each kg sits in EXACTLY ONE
+//    bucket — cluster / cargo / storage / processing holdings never double-
+//    count the same mass):
+//    hiddenKg + collectableKg + clusterKg + cargoKg + storageKg + processingKg
+//      == pollutionKg − generatedKg
+//
+//  Why the subtraction: freshly generated waste enters the atmosphere, not
+//  the recoverable pools, and burned waste has left the system entirely.
 
 export interface WasteLedger {
   initialWasteKg: number;
@@ -38,9 +45,12 @@ export interface WasteLedger {
   processingKg: number;
 }
 
+/** Layer 1 + Layer 2 residuals — both must be ~0 after every tick. */
 export function checkWasteInvariant(w: WasteLedger) {
+  // Layer 1: primary mass invariant
   const massBalance =
     w.pollutionKg + w.burnedKg - w.initialWasteKg - w.generatedKg;
+  // Layer 2: secondary pool invariant (disjoint holdings, never double-counted)
   const poolBalance =
     w.hiddenKg +
     w.collectableKg +
@@ -49,19 +59,7 @@ export function checkWasteInvariant(w: WasteLedger) {
     w.storageKg +
     w.processingKg -
     (w.pollutionKg - w.generatedKg);
-  // Design-doc form (initial + generated == hidden + collectable + cargo +
-  // storage + processing + burned). Reported for reference only: it assumes
-  // generation flows directly into the pools and clusters are not separately
-  // materialized, so it deviates in the production engine.
-  const userFormula =
-    w.hiddenKg +
-    w.collectableKg +
-    w.cargoKg +
-    w.storageKg +
-    w.processingKg +
-    w.burnedKg -
-    (w.initialWasteKg + w.generatedKg);
-  return { massBalance, poolBalance, userFormula };
+  return { massBalance, poolBalance };
 }
 
 // ---------------------------------------------------------------------------
@@ -121,13 +119,17 @@ export function robotDemands(state: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Batch/Reservation allocation
+// 6. Batch/Reservation allocation (Design Freeze v0.4 — PRODUCTION
+//    COMPLIANCE, Sprint 2.5)
 // ---------------------------------------------------------------------------
-// The engine's runtime allocation is "nearest unclaimed cluster, reserved
-// while traveling/collecting" (spatial + reservation). The design freeze's
-// Batch/Reservation model is provided here as the reference oracle: robots are
-// processed in ascending level order (low-level floor access) in batches, each
-// taking its nearest unclaimed cluster.
+// The production tick (`world.ts`) and the oracle simulator
+// (`tests/engineSim.ts`) BOTH call this single function every tick to plan
+// reservations for idle, auto robots against unclaimed clusters. Guarantees:
+//   - shared pool scarcity: fewer clusters than robots ⇒ some robots wait;
+//   - L1/L5 mixed population: robots are processed in ascending level order;
+//   - guaranteed floor access: under scarcity low-level robots reserve first;
+//   - no duplicate reservation: each cluster is removed after assignment;
+//   - deterministic result: level order, tie-broken by robot id.
 
 export interface ClusterLike {
   x: number;
@@ -136,8 +138,8 @@ export interface ClusterLike {
   reservedBy?: unknown;
 }
 
-/** Nearest cluster with kg > 0 and no reservation — the exact rule the tick's
- * idle robot uses (world.ts stepRobot). Returns the cluster + distance. */
+/** Nearest cluster with kg > 0 and no reservation. Kept as a building block
+ * for tests and tooling; the tick itself uses batchAllocation. */
 export function selectCluster(
   pos: { x: number; y: number },
   clusters: readonly ClusterLike[],
@@ -160,6 +162,8 @@ export interface BatchRobot {
   x: number;
   y: number;
   level: number;
+  /** current battery — used with `opts.tripCost` to skip infeasible trips */
+  battery?: number;
 }
 export interface BatchCluster {
   id: string | number;
@@ -167,39 +171,54 @@ export interface BatchCluster {
   y: number;
   kg: number;
 }
+export interface BatchOptions {
+  /** Round-trip battery cost for a robot at a given distance. When provided,
+   * a robot only reserves a cluster it can afford; infeasible candidates are
+   * skipped in distance order. */
+  tripCost?: (robot: BatchRobot, distance: number) => number;
+}
 
 /**
- * Batch/Reservation reference model (freeze v0.3):
- * - robots sorted by ascending level, so low-level players get floor access;
- * - processed in batches; each robot in the batch reserves its nearest
- *   unclaimed cluster;
+ * Batch/Reservation allocation (freeze v0.3/v0.4) — the SINGLE reference the
+ * production tick and the harness both use:
+ * - robots sorted by ascending level (tie-break: id) ⇒ floor access for L1;
+ * - processed in batches of `batchSize`;
+ * - each robot takes its NEAREST affordable unclaimed cluster;
  * - returns Map<robotId, clusterId> of successful reservations.
  */
 export function batchAllocation(
   robots: BatchRobot[],
   clusters: BatchCluster[],
   batchSize = 20,
+  opts: BatchOptions = {},
 ): Map<string | number, string | number> {
-  const sorted = [...robots].sort((a, b) => a.level - b.level);
+  const sorted = [...robots].sort(
+    (a, b) => a.level - b.level || (String(a.id) < String(b.id) ? -1 : 1),
+  );
   const available = [...clusters];
   const assignments = new Map<string | number, string | number>();
   for (let i = 0; i < sorted.length; i += batchSize) {
     const batch = sorted.slice(i, i + batchSize);
     for (const robot of batch) {
-      let bestIdx = -1;
-      let bestD = Infinity;
-      for (let j = 0; j < available.length; j++) {
-        const c = available[j];
-        if (c.kg <= 0) continue;
-        const d = Math.hypot(robot.x - c.x, robot.y - c.y);
-        if (d < bestD) {
-          bestD = d;
-          bestIdx = j;
+      const candidates = available
+        .map((c, j) => ({ j, d: Math.hypot(robot.x - c.x, robot.y - c.y) }))
+        .filter((x) => available[x.j].kg > 0)
+        .sort((a, b) => a.d - b.d);
+      let chosen = -1;
+      for (const cand of candidates) {
+        if (
+          opts.tripCost &&
+          robot.battery != null &&
+          robot.battery < opts.tripCost(robot, cand.d)
+        ) {
+          continue; // nearest cluster too far for the battery — try next
         }
+        chosen = cand.j;
+        break;
       }
-      if (bestIdx >= 0) {
-        assignments.set(robot.id, available[bestIdx].id);
-        available.splice(bestIdx, 1);
+      if (chosen >= 0) {
+        assignments.set(robot.id, available[chosen].id);
+        available.splice(chosen, 1); // no duplicate reservation
       }
     }
   }

@@ -1,4 +1,4 @@
-# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy updated to DESIGN FREEZE v0.4)
+# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5)
 
 Verified against the repository on disk (Freebuff Web / Vly sandbox).
 Everything below is grounded in actual files; anything not in the repo is
@@ -7,7 +7,10 @@ explicitly marked NOT PRESENT / NOT VERIFIED. Mock vs real is always labeled.
 Verification evidence (latest run):
 - `bunx convex dev --once` → exit 0 (`Convex functions ready!`, dev deployment)
 - `bunx tsc -b --noEmit` → exit 0
-- `bun test tests/economy.test.ts` → **26 pass / 0 fail** (45 assertions)
+- `bun test tests/` → **64 pass / 0 fail** (996 assertions; economy + engine harness)
+- Live clean-world audit: `bunx convex run harness:resetWorld` then
+  `harness:invariantAudit` — Layer 1 (mass) = 0, Layer 2 (pool) = 0 at reset
+  and at machine precision after real cron ticks (see §7 Sprint 2.5 note)
 - Live engine check: `bunx convex run world:worldState` — cron fires every 2 s
   (pollution +0.8333 kg/tick, +25 clusters/tick), Burn Zone observed
   `active ×1.2` at random (x, y) with the event feed recording it
@@ -29,6 +32,18 @@ Verification evidence (latest run):
 Everything else from Design Freeze v0.3 (spatial robot, Global Waste Pool,
 Model C, Batch/Reservation, world capacity/pollution/collapse, upgrade costs)
 is **unchanged** in v0.4 — see §13 for the v0.3 compliance matrix.
+
+---
+
+## SPRINT 2.5 — PRODUCTION CONSISTENCY & CLEAN WORLD (supersedes §13 rows below)
+
+| Item | Change | Code | Evidence |
+|---|---|---|---|
+| Batch Allocation | Production tick now plans reservations via the SAME `batchAllocation` the harness tests (`engine.ts`): level-ordered floor access, battery feasibility, batch size 20, deterministic (level + id tie-break), no duplicate reservation | `world.ts` tick §2, `engine.ts` §6, `tests/engine.test.ts` §4b | tests prove prod result == reference; floor access verified under scarcity |
+| Clean World | `harness:resetWorld` re-seeds pristine World 0 (10,000 t, 50%, 10% collectable, generated 0, burned 0, residual 0). **Fixes the pre-2.5 seed write-back bug** (seedWorld never wrote the post-spawn collectable balance back → ~13.5 t of phantom pool mass, the "legacy drift" reported in Sprint 2.4) | `world.ts seedWorld` + collapse branch, `harness.ts resetWorld` | live audit: massBalance 0, poolBalance 0 at reset and after 10 s of cron ticks |
+| Invariant spec | Old single-equation physical invariant RETIRED. Official two-layer accounting: **Layer 1** `seed + generated == pollution + burned`; **Layer 2** `hidden + collectable + clusters + cargo + storage + processing == pollution − generated` (pool buckets are disjoint — never double-counted) | `engine.ts` §1, `harness:invariantAudit`, `DATABASE_SCHEMA.md` | live audit + all 64 tests |
+| Collapse consistency | Player-held waste (cargo/storage/processing) is lost with the world so Layer 2 stays exact on reset; balances and upgrades carry over | `world.ts` collapse branch + `engineSim.ts` | post-collapse invariant tests |
+
 
 ---
 
@@ -235,10 +250,14 @@ remain only as DEPRECATED legacy aliases.)
   `unlockKg = min(hiddenKg, hiddenKg × replFracH × 1/60)`;
   `collectableKg += unlockKg`; `hiddenKg -= unlockKg`.
   → **Identical to the freeze formula**, recomputed **every tick (2 s real)**.
-- **Batch allocation:** single reservation (`wasteClusters.reservedBy`) on
-  `commandRobot`/auto-target; cleanup pass releases reservations whose owner no
-  longer targets the cluster (`to_cluster`/`collecting`). Freeze's "floor access
-  guarantee for low-level players" is **not** enforced (deviation).
+- **Batch allocation (Sprint 2.5):** the auto-target path no longer grabs
+  clusters first-come-first-served. Every tick, idle auto robots with cargo room
+  are matched to unclaimed clusters via `engine.ts batchAllocation` — robots
+  sorted by ascending level (tie-break id), batches of `WORLD.BATCH_SIZE`,
+  each robot takes its nearest affordable unclaimed cluster. Guarantees
+  scarcity behavior, L1 floor access, no duplicate reservation, deterministic
+  result. `commandRobot` (manual) still reserves directly; the tick's cleanup
+  pass releases stale reservations.
 - **Cluster spawn:** while `active < 500 && collectable ≥ 150 && spawned < 25`:
   `size = min(150 + rand×750, collectable)`; `collectable -= size`.
 - **Burn (v0.4, exactly-once):** `burn = min(queuedKg, 2 × 2s)` per slice;
@@ -353,7 +372,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | Dynamic Replenishment Model C | `world.ts` `tick` §3 | ✅ | formula identical |
 | Replenishment clip 5%–9% | `REPLENISHMENT` + `tick` §3 | ✅ | min/max applied |
 | Periodic recalculation | `cron.ts` + `tick` | ✅ with note | every 2 s real (= 1 game min, 30× compression) — freeze didn't specify real-time cadence; **DEVIATION (documented choice)** |
-| Batch Allocation | `game.ts` `commandRobot`, `world.ts` cleanup | ⚠️ PARTIAL | reservation implemented; freeze's low-level "floor access guarantee" NOT enforced |
+| Batch Allocation | `world.ts` tick §2 via `engine.ts` `batchAllocation` | ✅ DONE (Sprint 2.5) | level-ordered floor access, battery-feasible, deterministic, no duplicate reservation; prod == reference tested |
 | Cargo costs 150/225/340/510 | `UPGRADES.cargo.costs` | ✅ | |
 | Recharge costs 20/30/45/65 | `UPGRADES.recharge.costs` | ✅ | |
 | Storage/Battery remain P1 | `UPGRADES.storage/battery.costs` | ⚠️ DEVIATION | freeze left open; filled with MVP placeholders (200/320/500/760, 120/190/300/470), flagged P1 |
@@ -362,6 +381,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | No collapse countdown | `tick` §6 | ✅ | immediate reset |
 | Single waste type | schema (`wasteClusters.kg` only) | ✅ | no waste-type field |
 | Global waste pool | `worlds` fields + `tick` §1–4 | ✅ | |
+| Two-layer waste invariant | `engine.ts` §1 + `harness:invariantAudit` | ✅ (Sprint 2.5) | Layer 1 mass + Layer 2 pool both ~0 live; old physical invariant retired |
 | Robot spatial model | `world.ts` `stepRobot` | ✅ | position/speed/battery/cargo/distance |
 | Demand from real throughput | `tick` §2 | ⚠️ DEVIATION | uses fixed 42 kg/h reference, not measured throughput |
 | REST API + WebSocket | — | ❌ DEVIATION | Convex functions replace FastAPI/WS (not present in repo) |
@@ -375,7 +395,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 |---|---|
 | Design | DONE (per source doc; doc not in repo) |
 | Simulation | NOT IN REPO (Python sim from doc was not transferred; Convex engine is the production stand-in) |
-| Backend Engine | DONE (world.ts) |
+| Backend Engine | DONE (world.ts + crons.ts; Sprint 2.5: batch compliance, two-layer invariant, clean world) |
 | Backend API | PARTIAL (Convex functions only; no REST/WebSocket layer) |
 | Persistence | DONE (Convex DB, dev deployment) |
 | Frontend | DONE (landing + game) |
@@ -392,15 +412,14 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 
 | # | TASK | ROLE | DEPENDENCY | OUTPUT | ACCEPTANCE CRITERIA |
 |---|---|---|---|---|---|
-| 1 | End-to-end burn test with a real signed-in player (browser or seeded mutation) | Backend/QA | — | authenticated player collects → processes → burns; ledger rows inspected | `rewardLedger` gains normal + burn-zone entries; `toxBalance` grows; pollution drops; `solBalance` unchanged |
-| 2 | Engine invariant harness (mass conservation) | Backend | — | headless script driving `tick` N ticks, asserting `spawn = collect + burn + residual` | Invariant within epsilon over 1000 ticks; collapse/reset verified |
-| 3 | Storage/Battery P1 rebalance | Economy | #2 | `gameParams.ts` update | Playtest data; storage pressure + progression ROI measured |
-| 4 | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | schema + tick logic + UI | Each system has test + UI state |
-| 5 | Concurrency hardening of `tick` (atomic guard) | Backend | — | atomic CAS or serialized tick | Double-advance impossible under concurrent calls |
-| 6 | Real Solana entry rail (0.1 SOL base purchase) | Backend/Frontend | — | Coinbase Commerce or wallet SDK; server-side verification | Purchase verified on devnet; base granted only on confirmation; burn still pays TOX only |
-| 7 | Performance: spatial bucketing for nearest-cluster | Backend | — | indexed/spatial lookup | 10k-player tick < 2 s |
-| 8 | Multiplayer QA (10/100/1k/10k) | QA | #7 | load script + report | Throughput/pollution curves match sim |
-| 9 | Production deployment | DevOps | — | `bunx convex deploy` + prod envs | Landing + game on prod URL; cron firing |
+| 1 | Storage/Battery P1 rebalance | Economy | — | `gameParams.ts` update | Playtest data; storage pressure + progression ROI measured |
+| 2 | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | schema + tick logic + UI | Each system has test + UI state |
+| 3 | Concurrency hardening of `tick` (atomic guard) | Backend | — | atomic CAS or serialized tick | Double-advance impossible under concurrent calls |
+| 4 | Real Solana entry rail (0.1 SOL base purchase) | Backend/Frontend | — | Coinbase Commerce or wallet SDK; server-side verification | Purchase verified on devnet; base granted only on confirmation; burn still pays TOX only |
+| 5 | Performance: spatial bucketing for nearest-cluster | Backend | — | indexed/spatial lookup | 10k-player tick < 2 s |
+| 6 | Live-DB load test (10/100/1k/10k) on the clean world | QA | #5 | seeded load script against Convex dev | Per-tick timing + invariant skew recorded on the clean baseline |
+| 7 | Multiplayer QA (concurrent clients) | QA | #6 | session concurrency test | No double reservations; leaderboard consistent |
+| 8 | Production deployment | DevOps | — | `bunx convex deploy` + prod envs | Landing + game on prod URL; cron firing |
 
 ---
 
@@ -423,13 +442,14 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 
 | Area | Status | Real/Mock | Evidence | Next Owner | Next Task |
 |---|---|---|---|---|---|
-| World engine | DONE | REAL (server sim, cron-driven) | `src/convex/world.ts` + `crons.ts` | Backend | #2 invariant harness |
+| World engine | DONE | REAL (server sim, cron-driven) | `src/convex/world.ts` + `crons.ts` + `engine.ts` | Backend | #3 atomic tick guard |
+| Engine consistency (Sprint 2.5) | DONE | REAL | `batchAllocation` prod compliance, two-layer invariant, clean world (`harness:resetWorld`) | Backend | #6 live-DB load test |
 | Economy (v0.4) | DONE | REAL (in-database ledger) | `economy.ts`, `rewardLedger`, `burnZones` | Economy | #3 P1 balance |
 | Backend API | PARTIAL | REAL | `game.ts`, `world.ts` | Backend | — |
 | Persistence | DONE | REAL | `schema.ts` | — | — |
-| Frontend | DONE | REAL | `pages/`, `components/game/` | Frontend | #1 browser test |
+| Frontend | DONE | REAL | `pages/`, `components/game/` | Frontend | — |
 | Auth | DONE | REAL | `convex/auth*.ts` | — | — |
-| Reward settlement | PARTIAL (TOX ledgered exactly-once; SOL none by design) | REAL (ledger) | `rewardLedger` | Backend | #1 e2e burn test |
+| Reward settlement | PARTIAL (TOX ledgered exactly-once; SOL none by design) | REAL (ledger) | `rewardLedger` | Backend | #1 P1 rebalance |
 | Solana | NOT IMPLEMENTED | MOCK | none (no packages) | Blockchain | #6 entry rail |
 | Multiplayer | PARTIAL | REAL | shared world state | QA | #8 load test |
 | Production deploy | NOT CONFIGURED | — | dev deployment only | DevOps | #9 deploy |
@@ -439,23 +459,30 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 ## CURRENT PROJECT STATE
 A playable single-world MVP on Convex + React with a **v0.4 TOX-only reward
 economy**: server-authoritative spatial robots, global waste pool with Model C
-replenishment and reservation allocation, burn → TOX (500/ton, ×1.2 in random
-server-driven Burn Zones) credited exactly-once through a `rewardLedger` table,
-upgrades, collapse/reset, auth, and a themed landing + game UI. The world tick
-cron now actually fires (renamed `crons.ts`); SOL exists only as a mock entry
-balance for the base purchase. No blockchain code exists.
+replenishment, burn → TOX (500/ton, ×1.2 in random server-driven Burn Zones)
+credited exactly-once through a `rewardLedger` table, upgrades, collapse/reset,
+auth, and a themed landing + game UI. The world tick cron fires every 2 s
+(`crons.ts`); SOL exists only as a mock entry balance for the base purchase. No
+blockchain code exists. **Sprint 2.5** made the engine consistent with the
+freeze: the tick plans robot reservations through the same `batchAllocation`
+reference the harness tests (level-ordered floor access, deterministic, no
+duplicate reservation), the two-layer waste invariant (mass + pool) is the
+official accounting and holds live at machine precision, and a clean world
+baseline (`harness:resetWorld`) removed the pre-2.5 seed write-back bug that
+had leaked ~13.5 t of phantom pool mass.
 
 ## CRITICAL BLOCKERS
-1. No end-to-end burn test with an authenticated player (CLI can't sign in) —
-   the collect→burn→ledger path is unit- and live-state verified, not e2e.
-2. No engine invariant harness (mass conservation over many ticks).
-3. No Solana integration of any kind (wallet, transactions, treasury) — SOL is
+1. No Solana integration of any kind (wallet, transactions, treasury) — SOL is
    mock by design under v0.4.
-4. `tick` concurrency guard is not atomic — theoretical double-advance exists.
-5. No production deployment configured (dev-only).
+2. `tick` concurrency guard is not atomic — theoretical double-advance exists
+   (unverified under concurrent clients).
+3. No production deployment configured (dev-only).
+4. No live-DB load test at 10k players (the 10k scale test runs the headless
+   oracle sim, not the Convex DB path).
+5. Storage/Battery upgrade costs are P1 placeholders awaiting rebalance.
 
 ## NEXT IMMEDIATE TASK
-**Run the first authenticated end-to-end burn:** sign in via the app, deploy
-the base, let the robot collect, process, and burn — then verify `rewardLedger`
-rows (normal + burn-zone kinds), `toxBalance` growth, `solBalance` unchanged,
-and the pollution drop in the dev dashboard.
+**Run a live-DB load test on the clean world** (seed 10/100/1k/10k simulated
+players in a sandbox, drive `tick`, record per-tick timing + both invariant
+layers) — then rebalance Storage/Battery P1 costs using the recorded
+progression ROI.

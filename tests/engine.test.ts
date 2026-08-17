@@ -1,13 +1,15 @@
-// TOXIC WORLD — Sprint 2.4 PRODUCTION ENGINE TEST HARNESS.
+// TOXIC WORLD — PRODUCTION ENGINE TEST HARNESS (Sprint 2.4 + Sprint 2.5).
 //
 // Automates the behaviors previously validated in the Python simulation against
 // the real engine code: the SAME pure functions the production tick calls
 // (src/convex/engine.ts, economy.ts, gameParams.ts) plus a deterministic
 // headless oracle simulator (tests/engineSim.ts) that mirrors world.ts
-// step-for-step.
+// step-for-step. Sprint 2.5 adds: Batch/Reservation production compliance
+// (production tick == reference batchAllocation) and the clean-world baseline.
 //
 // Run:  bun test tests/engine.test.ts
 // Plus live-DB audit:  bunx convex run harness:invariantAudit
+// Clean baseline:      bunx convex run harness:resetWorld
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -32,6 +34,7 @@ import {
   ROBOT,
   UPGRADES,
   WORLD,
+  batteryForTrip,
 } from "../src/convex/gameParams";
 import {
   createSimWorld,
@@ -46,10 +49,13 @@ const approx = (a: number, b: number, tol = 1e-6) =>
   expect(Math.abs(a - b)).toBeLessThanOrEqual(tol);
 
 // ---------------------------------------------------------------------------
-// 1. Waste invariant — Initial Waste + Generated = every tracked bucket
+// 1. Waste invariant — OFFICIAL TWO-LAYER accounting (Sprint 2.5 spec):
+//   Layer 1 (mass):  seed + generated == pollution + burned
+//   Layer 2 (pool):  hidden + collectable + clusters + cargo + storage +
+//                    processing == pollution − generated  (disjoint buckets)
 // ---------------------------------------------------------------------------
 
-describe("1. waste invariant", () => {
+describe("1. waste invariant (two layers)", () => {
   test("pure checkWasteInvariant balances a hand-built ledger", () => {
     const inv = checkWasteInvariant({
       initialWasteKg: 5_000_000,
@@ -78,6 +84,33 @@ describe("1. waste invariant", () => {
       approx(h.massBalance, 0, 1e-6);
       approx(h.poolBalance, 0, 1e-6);
     }
+  });
+
+  test("clean world starts with both layers at exactly 0 (Sprint 2.5 baseline)", () => {
+    const w = createSimWorld({ players: 0, seed: 1, autoQueue: false });
+    expect(w.worldId).toBe(0);
+    expect(w.capacityKg).toBe(10_000_000);
+    approx(w.pollutionKg, 5_000_000); // 50%
+    approx(w.hiddenKg, 4_500_000);
+    const clusterKg = w.clusters.reduce((s, c) => s + c.kg, 0);
+    approx(w.collectableKg + clusterKg, 500_000); // 10% collectable
+    expect(w.generatedKg).toBe(0);
+    expect(w.burnedKg).toBe(0);
+    expect(w.resetCount).toBe(0);
+    const inv = checkWasteInvariant({
+      initialWasteKg: w.seedPollutionKg,
+      generatedKg: 0,
+      pollutionKg: w.pollutionKg,
+      burnedKg: 0,
+      hiddenKg: w.hiddenKg,
+      collectableKg: w.collectableKg,
+      clusterKg,
+      cargoKg: 0,
+      storageKg: 0,
+      processingKg: 0,
+    });
+    approx(inv.massBalance, 0, 1e-9);
+    approx(inv.poolBalance, 0, 1e-9);
   });
 
   test("legacy world re-anchor (seed = initial frac, generated derived) balances both", () => {
@@ -257,6 +290,160 @@ describe("4. batch allocation", () => {
     const found = selectCluster({ x: 150, y: 150 }, clusters);
     expect(found?.cluster.x).toBe(200);
     expect(found?.cluster.y).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4b. Batch Allocation — PRODUCTION COMPLIANCE (Sprint 2.5)
+// ---------------------------------------------------------------------------
+// world.ts and engineSim.ts both plan reservations via engine.ts
+// batchAllocation (level-ordered, battery-feasible, deterministic). These
+// tests prove the production result equals the reference on identical inputs.
+
+describe("4b. batch allocation production compliance (Sprint 2.5)", () => {
+  /** 8 robots (4×L1 near (100,100), 4×L5 near (500,500)), 2 clusters near
+   * the L1 block: shared-pool scarcity with a mixed population. */
+  function batchFixture() {
+    const w = createSimWorld({
+      players: 8,
+      seed: 99,
+      clusterTarget: 2,
+      autoQueue: false,
+    });
+    const l1Pos = [
+      [100, 100],
+      [100, 110],
+      [100, 120],
+      [100, 130],
+    ];
+    const l5Pos = [
+      [500, 500],
+      [500, 510],
+      [500, 520],
+      [500, 530],
+    ];
+    w.players.forEach((p, i) => {
+      const lv = i < 4 ? 1 : 5;
+      p.levels = { cargo: lv, recharge: lv, battery: lv, storage: lv };
+      p.battery = UPGRADES.battery.caps[lv - 1];
+      const pos = i < 4 ? l1Pos[i] : l5Pos[i - 4];
+      p.baseX = pos[0];
+      p.baseY = pos[1];
+      p.x = pos[0];
+      p.y = pos[1];
+      p.fromX = pos[0];
+      p.fromY = pos[1];
+    });
+    // pin both clusters next to the L1 block
+    w.clusters[0].x = 105;
+    w.clusters[0].y = 105;
+    w.clusters[1].x = 110;
+    w.clusters[1].y = 110;
+    return w;
+  }
+
+  test("production tick reservations == reference batchAllocation (same snapshot)", () => {
+    const w = batchFixture();
+    const reference = batchAllocation(
+      w.players
+        .filter(
+          (p) =>
+            p.hasBase &&
+            p.auto &&
+            p.state === "idle" &&
+            p.cargoKg < UPGRADES.cargo.caps[p.levels.cargo - 1],
+        )
+        .map((p) => ({
+          id: p.id,
+          x: p.x,
+          y: p.y,
+          level: p.levels.cargo,
+          battery: p.battery,
+        })),
+      w.clusters
+        .filter((c) => c.kg > 0 && c.reservedBy == null)
+        .map((c) => ({ id: c.id, x: c.x, y: c.y, kg: c.kg })),
+      WORLD.BATCH_SIZE,
+      { tripCost: (_r, d) => batteryForTrip(d) },
+    );
+
+    tickSim(w); // the production-mirror tick commits its planned reservations
+
+    for (const p of w.players) {
+      const assigned = reference.get(p.id);
+      if (assigned != null) {
+        expect(p.state).toBe("to_cluster");
+        expect(p.targetClusterId).toBe(assigned);
+      } else {
+        expect(p.state).toBe("idle");
+        expect(p.targetClusterId).toBeNull();
+      }
+    }
+  });
+
+  test("shared-pool scarcity + mixed L1/L5: floor access for L1, L5 waits", () => {
+    const w = batchFixture();
+    tickSim(w);
+    const assigned = w.players.filter((p) => p.state === "to_cluster");
+    expect(assigned.length).toBe(2); // only the two clusters exist
+    for (const p of assigned) {
+      expect(p.levels.cargo).toBe(1); // L1 robots reserve before L5
+    }
+    for (const p of w.players.filter((p) => p.levels.cargo === 5)) {
+      expect(p.state).toBe("idle"); // pool exhausted by L1 floor access
+      expect(p.targetClusterId).toBeNull();
+    }
+  });
+
+  test("no duplicate reservation: one cluster per robot, one target per robot", () => {
+    const w = createSimWorld({ players: 24, seed: 31, autoQueue: true });
+    runSim(w, 300);
+    const reserved = w.clusters.filter((c) => c.reservedBy != null);
+    const owners = new Set(reserved.map((c) => c.reservedBy));
+    expect(owners.size).toBe(reserved.length); // no robot owns two clusters
+    for (const p of w.players) {
+      if (p.targetClusterId == null) continue;
+      const c = w.clusters.find((x) => x.id === p.targetClusterId);
+      if (!c) continue; // depleted mid-flight
+      expect(c.reservedBy).toBe(p.id); // robot still owns its target
+      expect(["to_cluster", "collecting"]).toContain(p.state);
+    }
+    // invariants still hold under the batch plan
+    const last = w.invariantHistory[w.invariantHistory.length - 1];
+    approx(last.massBalance, 0, 1e-6);
+    approx(last.poolBalance, 0, 1e-6);
+  });
+
+  test("deterministic: same seed ⇒ identical trips, cargo and TOX", () => {
+    const a = createSimWorld({ players: 20, seed: 1234, autoQueue: true });
+    const b = createSimWorld({ players: 20, seed: 1234, autoQueue: true });
+    runSim(a, 120);
+    runSim(b, 120);
+    expect(a.players.map((p) => p.totalTrips)).toEqual(
+      b.players.map((p) => p.totalTrips),
+    );
+    expect(a.players.map((p) => p.totalCollectedKg)).toEqual(
+      b.players.map((p) => p.totalCollectedKg),
+    );
+    expect(a.players.map((p) => p.toxBalance)).toEqual(
+      b.players.map((p) => p.toxBalance),
+    );
+  });
+
+  test("battery feasibility: a robot that cannot afford the trip is not assigned", () => {
+    const robots = [
+      { id: "a", x: 0, y: 0, level: 1, battery: 2 },
+      { id: "b", x: 1000, y: 1000, level: 5, battery: 500 },
+    ];
+    const clusters = [
+      { id: 1, x: 0, y: 10, kg: 500 },
+      { id: 2, x: 1010, y: 1010, kg: 500 },
+    ];
+    const a = batchAllocation(robots, clusters, 20, {
+      tripCost: (_r, d) => d,
+    });
+    expect(a.has("a")).toBe(false); // cost 10 > battery 2 → recharges instead
+    expect(a.get("b")).toBe(2); // high-level robot takes the remaining pool
   });
 });
 

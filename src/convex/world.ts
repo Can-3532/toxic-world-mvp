@@ -16,10 +16,10 @@ import {
   type BurnSlice,
 } from "./economy";
 import {
+  batchAllocation,
   checkWasteInvariant,
   replenishmentModelC,
   robotDemands,
-  selectCluster,
   worldStatus,
 } from "./engine";
 import { batteryCap, cargoCap, storageCap } from "./game";
@@ -91,7 +91,14 @@ async function spawnClusters(
   return remaining;
 }
 
-async function seedWorld(ctx: MutationCtx, now: number): Promise<Doc<"worlds">> {
+/** Create the pristine World 0 (Sprint 2.5 clean baseline): capacity 10,000 t,
+ * 50% pollution, 10% collectable, generated 0, burned 0, zero legacy residual.
+ * Exported so the QA harness (`harness:resetWorld`) re-seeds the exact same
+ * clean world. */
+export async function seedWorld(
+  ctx: MutationCtx,
+  now: number,
+): Promise<Doc<"worlds">> {
   const pollutionKg = WORLD.CAPACITY_KG * WORLD.INITIAL_POLLUTION_FRAC;
   const collectableKg = pollutionKg * WORLD.INITIAL_COLLECTABLE_FRAC;
   const id = await ctx.db.insert("worlds", {
@@ -113,8 +120,19 @@ async function seedWorld(ctx: MutationCtx, now: number): Promise<Doc<"worlds">> 
     generatedKg: 0,
     invariantSkewKg: 0,
   });
+  // LOAD-BEARING (Sprint 2.5): spawnClusters deducts from the collectable
+  // pool — the remaining balance MUST be written back, or the seeded clusters
+  // become phantom pool mass and Layer 2 (pool invariant) carries a ~13.5 t
+  // skew for the entire world cycle.
+  const remaining = await spawnClusters(
+    ctx,
+    0,
+    collectableKg,
+    WORLD.ACTIVE_CLUSTER_TARGET,
+    0,
+  );
+  await ctx.db.patch(id, { collectableKg: remaining });
   const world = (await ctx.db.get(id)) as Doc<"worlds">;
-  await spawnClusters(ctx, 0, world.collectableKg, WORLD.ACTIVE_CLUSTER_TARGET, 0);
   await addEvent(
     ctx,
     0,
@@ -136,6 +154,7 @@ async function stepRobot(
   clusterMap: ClusterMap,
   now: number,
   dtReal: number,
+  assignments: Map<string | number, string | number>,
 ): Promise<boolean> {
   if (!p.hasBase) return false;
   const base = { x: p.baseX ?? WORLD.MAP_SIZE / 2, y: p.baseY ?? WORLD.MAP_SIZE / 2 };
@@ -175,24 +194,27 @@ async function stepRobot(
         pl.totalCollectedKg += unload;
       }
       if (r.auto && r.cargoKg < cCap) {
-        // Batch/Reservation: nearest unclaimed cluster (engine.ts selectCluster)
-        const found = selectCluster(r, [...clusterMap.values()]);
-        if (found) {
-          const best = found.cluster as Doc<"wasteClusters">;
-          const bestD = found.distance;
-          const tripBattery = batteryForTrip(bestD);
-          if (r.battery >= tripBattery) {
-            await ctx.db.patch(best._id, { reservedBy: p._id, reservedAt: now });
-            clusterMap.set(best._id, { ...best, reservedBy: p._id, reservedAt: now });
-            r.state = "to_cluster";
-            r.targetClusterId = best._id;
-            r.fromX = r.x;
-            r.fromY = r.y;
-            r.departAt = now;
-            r.arriveAt = now + (bestD / ROBOT.SPEED_M_S) * 1000;
-          } else if (r.battery < bCap) {
-            r.state = "recharging";
-          }
+        // Batch/Reservation (Sprint 2.5): the tick planned this robot's target
+        // once this tick via engine.ts batchAllocation (level-ordered floor
+        // access, battery-feasible, no duplicate reservation).
+        const assigned = assignments.get(p._id);
+        const target = assigned
+          ? (clusterMap.get(assigned as Id<"wasteClusters">) as
+              | Doc<"wasteClusters">
+              | undefined)
+          : undefined;
+        if (target && target.kg > 0) {
+          const bestD = dist(r, target);
+          await ctx.db.patch(target._id, { reservedBy: p._id, reservedAt: now });
+          clusterMap.set(target._id, { ...target, reservedBy: p._id, reservedAt: now });
+          r.state = "to_cluster";
+          r.targetClusterId = target._id;
+          r.fromX = r.x;
+          r.fromY = r.y;
+          r.departAt = now;
+          r.arriveAt = now + (bestD / ROBOT.SPEED_M_S) * 1000;
+        } else if (r.battery < bCap) {
+          r.state = "recharging";
         }
       }
       break;
@@ -391,10 +413,35 @@ export const tick = mutation({
     let seedPollutionKg =
       world.seedPollutionKg ?? world.pollutionKg + world.burnedKg;
 
-    // 2) robots
+    // 2) robots — Batch/Reservation plan first (Sprint 2.5): idle, auto
+    // robots with cargo room are matched against UNCLAIMED clusters once per
+    // tick, in ascending level order (low-level floor access), deterministic,
+    // battery-feasible. stepRobot then commits each planned reservation.
+    const batchAssignments = batchAllocation(
+      players
+        .filter(
+          (p) =>
+            p.hasBase &&
+            p.robot.auto &&
+            p.robot.state === "idle" &&
+            p.robot.cargoKg < cargoCap(p),
+        )
+        .map((p) => ({
+          id: p._id,
+          x: p.robot.x,
+          y: p.robot.y,
+          level: p.levels.cargo,
+          battery: p.robot.battery,
+        })),
+      [...clusterMap.values()]
+        .filter((c) => c.kg > 0 && !c.reservedBy)
+        .map((c) => ({ id: c._id, x: c.x, y: c.y, kg: c.kg })),
+      WORLD.BATCH_SIZE,
+      { tripCost: (_r, d) => batteryForTrip(d) },
+    );
     let demandKgH = 0;
     for (const p of players) {
-      const isActive = await stepRobot(ctx, p, clusterMap, now, dtReal);
+      const isActive = await stepRobot(ctx, p, clusterMap, now, dtReal, batchAssignments);
       if (isActive) demandKgH += WORLD.DEMAND_REF_KG_H;
     }
 
@@ -533,6 +580,17 @@ export const tick = mutation({
         const by = p.baseY ?? WORLD.MAP_SIZE / 2;
         await ctx.db.patch(p._id, {
           worldId: newWorldId,
+          // Sprint 2.5 consistency: waste held by players is part of the
+          // dying world's pool — it is LOST in the collapse, so Layer 2
+          // (pool invariant) stays exact on the reset. Balances/upgrades
+          // carry over; stockpiles do not.
+          storageKg: 0,
+          processing: {
+            queuedKg: 0,
+            since: now,
+            sessionId: undefined,
+            sliceIndex: 0,
+          },
           robot: {
             ...p.robot,
             state: "idle",
@@ -546,7 +604,14 @@ export const tick = mutation({
           },
         });
       }
-      await spawnClusters(ctx, newWorldId, collectableKg, WORLD.ACTIVE_CLUSTER_TARGET, 0);
+      // write back the post-spawn balance (see seedWorld note)
+      collectableKg = await spawnClusters(
+        ctx,
+        newWorldId,
+        collectableKg,
+        WORLD.ACTIVE_CLUSTER_TARGET,
+        0,
+      );
       await addEvent(ctx, newWorldId, "spawn", `World ${newWorldId} seeded — fresh pool unlocked`);
     }
 

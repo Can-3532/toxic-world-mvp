@@ -1,4 +1,4 @@
-# TOXIC WORLD — API SPECIFICATION v0.1 (economy v0.4)
+# TOXIC WORLD — API SPECIFICATION v0.1 (economy v0.4, engine Sprint 2.5)
 
 **Backend:** Convex serverless functions (NOT the FastAPI + WebSocket design from
 BACKEND TECHNICAL SPECIFICATION v0.1 — see DEVIATION notes in the handoff report).
@@ -8,6 +8,12 @@ BACKEND TECHNICAL SPECIFICATION v0.1 — see DEVIATION notes in the handoff repo
 > multiplier is decided server-side by the `burnZones` doc. Every burn slice is
 > credited exactly-once through the `rewardLedger` table (`key =
 > sessionId:sliceIndex`).
+>
+> **Sprint 2.5 engine consistency:** the world tick plans robot reservations
+> through the same `batchAllocation` reference used by the test harness
+> (level-ordered floor access, battery-feasible, deterministic, no duplicate
+> reservation), and the official waste accounting is the TWO-LAYER invariant
+> below (the old single-equation physical invariant is retired).
 
 Client references are auto-generated in `src/convex/_generated/api.ts`.
 All functions live under `src/convex/*.ts`. No REST endpoints exist except the
@@ -83,7 +89,10 @@ Convex Auth HTTP routes.
 ### `api.game.toggleAuto` — src/convex/game.ts
 - Args: `{}`
 - Auth: required
-- Effect: flips `robot.auto` (nearest-free-cluster autonomous targeting)
+- Effect: flips `robot.auto`. In auto mode the robot participates in the
+  per-tick Batch/Reservation plan (`engine.ts batchAllocation`): idle robots
+  are matched to unclaimed clusters in ascending level order (low-level floor
+  access), battery-feasible and deterministic.
 - Returns: `{ ok, auto }`
 
 ### `api.game.queueProcessing` — src/convex/game.ts
@@ -106,10 +115,13 @@ Convex Auth HTTP routes.
 ### `api.world.tick` — src/convex/world.ts
 - Args: `{}`
 - Auth: public — **intentionally callable but rate-limited**
-- Effect: advances the simulation one tick (generation → robots → replenishment
-  → clusters → burn → status/collapse). Guard: skips if `now - world.lastTick
-  < 0.8 × TICK_SECONDS × 1000`, so a client cannot accelerate the world.
+- Effect: advances the simulation one tick (generation → Batch/Reservation
+  planning → robots → replenishment → clusters → burn → status/collapse).
+  Guard: skips if `now - world.lastTick < 0.8 × TICK_SECONDS × 1000`, so a
+  client cannot accelerate the world.
 - Driven by the cron job `toxic-world-tick` (every 2s). Clients should NOT call it.
+- Writes per-tick mass-balance telemetry (`world.invariantSkewKg`); see the
+  two-layer invariant spec in §3c.
 
 ---
 
@@ -137,6 +149,37 @@ In `world:tick` (step 6): each burn slice looks up its key in `rewardLedger`;
 if absent it credits TOX (`toxBalance`, `toxFromNormal`/`toxFromZone`) and
 inserts the ledger row; if present it burns the kg with NO credit (duplicate-tick
 safe). Client-supplied numbers never enter this path.
+
+---
+
+## 3c. SPRINT 2.5 — WASTE ACCOUNTING SPEC + BATCH/RESERVATION (official)
+
+**Two-layer waste invariant** (supersedes the old physical invariant; verified
+live by `harness:invariantAudit` and every headless engine test):
+
+```
+Layer 1 — Primary Mass Invariant:
+    seedPollutionKg + generatedKg == pollutionKg + burnedKg
+
+Layer 2 — Secondary Pool Invariant (holdings partition the recoverable
+atmosphere; every kg sits in EXACTLY ONE bucket — never double-counted):
+    hiddenKg + collectableKg + clusterKg + cargoKg + storageKg + processingKg
+        == pollutionKg − generatedKg
+```
+
+Generated waste enters the atmosphere, not the pools; burned waste left the
+system — hence the subtraction in Layer 2.
+
+**Batch/Reservation allocation** (`engine.ts batchAllocation`, called by the
+production tick AND the oracle simulator on the same inputs): robots sorted by
+ascending level (tie-break: id), processed in batches of `WORLD.BATCH_SIZE`
+(20); each takes its nearest affordable unclaimed cluster. Guarantees: shared
+pool scarcity, L1 floor access, no duplicate reservation, deterministic result.
+
+**Clean World (Sprint 2.5):** `harness:resetWorld` re-seeds World 0 at
+capacity 10,000 t, pollution 50%, collectable 10%, generated 0, burned 0,
+zero legacy residual (fixes the pre-2.5 seed write-back bug that caused ~13.5 t
+of phantom pool mass). All benchmarks run from this baseline.
 
 ---
 

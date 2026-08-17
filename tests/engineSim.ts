@@ -15,10 +15,10 @@ import {
   batteryForTrip,
 } from "../src/convex/gameParams";
 import {
+  batchAllocation,
   checkWasteInvariant,
   replenishmentModelC,
   robotDemands,
-  selectCluster,
   worldStatus,
   type ClusterLike,
 } from "../src/convex/engine";
@@ -253,6 +253,7 @@ function stepRobot(
   clusterMap: Map<number, SimCluster>,
   now: number,
   dtReal: number,
+  assignments: Map<string | number, string | number>,
 ): boolean {
   if (!p.hasBase) return false;
   const base = { x: p.baseX, y: p.baseY };
@@ -287,21 +288,22 @@ function stepRobot(
         p.totalCollectedKg += unload;
       }
       if (p.auto && p.cargoKg < cCap) {
-        const found = selectCluster(p, [...clusterMap.values()]);
-        if (found) {
-          const c = found.cluster as SimCluster;
-          const d = found.distance;
-          if (p.battery >= batteryForTrip(d)) {
-            c.reservedBy = p.id;
-            p.state = "to_cluster";
-            p.targetClusterId = c.id;
-            p.fromX = p.x;
-            p.fromY = p.y;
-            p.departAt = now;
-            p.arriveAt = now + (d / ROBOT.SPEED_M_S) * 1000;
-          } else if (p.battery < bCap) {
-            p.state = "recharging";
-          }
+        // Batch/Reservation (Sprint 2.5) — planned once per tick, mirrors
+        // world.ts: level-ordered, battery-feasible, no duplicate reservation.
+        const assigned = assignments.get(p.id);
+        const target =
+          assigned != null ? clusterMap.get(assigned as number) : undefined;
+        if (target && target.kg > 0) {
+          const d = Math.hypot(p.x - target.x, p.y - target.y);
+          target.reservedBy = p.id;
+          p.state = "to_cluster";
+          p.targetClusterId = target.id;
+          p.fromX = p.x;
+          p.fromY = p.y;
+          p.departAt = now;
+          p.arriveAt = now + (d / ROBOT.SPEED_M_S) * 1000;
+        } else if (p.battery < bCap) {
+          p.state = "recharging";
         }
       }
       break;
@@ -480,11 +482,36 @@ export function tickSim(w: SimWorld): void {
   w.pollutionKg = Math.min(w.capacityKg, w.pollutionKg + genKgH * TICK_GAME_H);
   w.generatedKg += genKgH * TICK_GAME_H;
 
-  // 2) robots (spatial state machine)
+  // 2) robots (spatial state machine) — Batch/Reservation plan first,
+  // identical to world.ts (engine.ts batchAllocation on unclaimed clusters).
   const clusterMap = new Map(w.clusters.map((c) => [c.id, c]));
+  const batchAssignments = batchAllocation(
+    w.players
+      .filter(
+        (p) =>
+          p.hasBase &&
+          p.auto &&
+          p.state === "idle" &&
+          p.cargoKg < cargoCapOf(p),
+      )
+      .map((p) => ({
+        id: p.id,
+        x: p.x,
+        y: p.y,
+        level: p.levels.cargo,
+        battery: p.battery,
+      })),
+    [...clusterMap.values()]
+      .filter((c) => c.kg > 0 && c.reservedBy == null)
+      .map((c) => ({ id: c.id, x: c.x, y: c.y, kg: c.kg })),
+    WORLD.BATCH_SIZE,
+    { tripCost: (_r, d) => batteryForTrip(d) },
+  );
   let demandKgH = 0;
   for (const p of w.players) {
-    if (stepRobot(w, p, clusterMap, now, dtReal)) demandKgH += WORLD.DEMAND_REF_KG_H;
+    if (stepRobot(w, p, clusterMap, now, dtReal, batchAssignments)) {
+      demandKgH += WORLD.DEMAND_REF_KG_H;
+    }
   }
 
   // release stale reservations
@@ -538,6 +565,9 @@ export function tickSim(w: SimWorld): void {
       p.targetClusterId = null;
       p.cargoKg = 0;
       p.battery = batteryCapOf(p);
+      // Sprint 2.5 parity with world.ts: player-held waste is lost in the
+      // collapse so the pool invariant stays exact on the reset.
+      p.storageKg = 0;
       p.queuedKg = 0;
       p.sessionId = null;
       p.sliceIndex = 0;
