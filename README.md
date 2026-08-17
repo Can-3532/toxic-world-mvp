@@ -128,7 +128,7 @@ Conversions (5 s tick, 1 game-min/tick): `1 game-h = 60 ticks = 5 real-min`;
 ## Tests
 
 ```bash
-bun test tests/                 # all 82 tests (26 economy + 29 engine + 27 economy-validation), 4,418 assertions
+bun test tests/                 # all 92 tests (26 economy + 29 engine + 27 economy-validation + 10 storage/battery), 67,846 assertions
 bun test tests/engine.test.ts   # production engine test harness (Sprint 2.4 + 2.5 + 2.6)
 bun test tests/economy.test.ts  # v0.4 reward formulas, idempotency, pollution accounting
 bun test tests/economyValidation.test.ts  # Sprint 2.8: 5 s-tick economy (two time axes)
@@ -220,8 +220,10 @@ truth for the four values). Decisions:
 2. **500 TOX/t — KEPT.** Sensitivity 250/350/500/650 measured bucket-by-bucket
    (zone ×1.2 applied to the zone kg split): at 500 TOX/t, L2 = 1.63 game-h,
    L5 = 13.32 game-h, daily TOX = 2,206.7 (game-day) / 26,480 (real-day),
-   full upgrade-tree sink = 1.92 game-days. 31.0% of starter TOX comes from
-   Burn Zones. The 500 row reproduces the 2.8 baseline to machine precision.
+   full upgrade-tree sink = 1.52 game-days (recomputed in Sprint 2.10 — the
+   storage/battery rebalance cut the tree cost 4,245 → 3,365 TOX). 31.0% of
+   starter TOX comes from Burn Zones. The 500 row reproduces the 2.8 baseline
+   to machine precision.
 3. **Collapse tempo — real curve, target left OPEN.** 1K diligent players ⇒
    net NEGATIVE pollution (never collapses); 5K ⇒ 50→90 ≈ 23.2 game-h, 90→100
    ≈ 5.9 game-h; 10K ⇒ 8.8 + 2.3 game-h (≈ 0.92 real-h total). Activity
@@ -229,6 +231,29 @@ truth for the four values). Decisions:
    activity-limited. New measured tradeoff: the Sprint 2.6 sharded robot loop
    throttles per-player collection ~3.3× at 10K vs 5K (ROBOTS_PER_TICK
    sharding is now quantified).
+
+### Sprint 2.10 — Storage/Battery P1 rebalance (freeze v0.1)
+
+`bun test tests/storageBatteryValidation.test.ts` — 10 tests, green. Freeze
+doc: **`TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md`**. Resolves the
+Design Freeze v0.3 open item "Storage/Battery remain P1" — the MVP
+placeholders had INVERTED progression (storage total 1,780 > cargo total
+1,225). Measured track value on the oracle sim (seed 42, the frozen starter
+baseline):
+
+1. **Cargo (frozen, unchanged 150/225/340/510)** is the throughput track —
+   burned kg/game-h rises 174.38 → 587.52 across L1→L5 (3.4×); it stays the
+   #1 sink.
+2. **Storage rebalanced → 120/190/300/460 (total 1,070).** It is the
+   check-in/AFK buffer: on a 1 game-hour check-in cadence, L1 (60 kg) stalls
+   71.5% of real time (57.5 kg/game-h) while L4+ stalls 0% (167.7 kg/game-h).
+3. **Battery rebalanced → 100/160/250/400 (total 910).** The range/uptime
+   track: for a diligent starter the cap alone moves recharge dead time
+   7.71% → 6.81%; the frozen recharge RATE is the real dead-time fix
+   (7.71% → 2.15% sweeping recharge at 5/s → 26/s).
+4. **New order: cargo 1,225 > storage 1,070 > battery 910 > recharge 160**;
+   total sink 3,365 TOX = 1.52 game-days to max all tracks (was 1.92).
+   Caps/mechanics unchanged — cost-only rebalance.
 
 ### Sprint 2.7 — tick architecture (A/B/C decision)
 
@@ -272,7 +297,7 @@ bunx convex run harness:benchStatus       # counts + both invariant layers + dup
 
 Results (LIVE on `jovial-chickadee-617`, usage limit re-enabled, full sequence
 cleanup → reset → concurrency → 10/100/1k/10k benches → audit → cleanup → reset):
-- **Headless engine suite: ALL PASS** (`bun test tests/` — 55 tests / 179
+- **Headless engine suite: ALL PASS** (`bun test tests/` — 92 tests / 67,846
   assertions), including the 10k-player scale sim (invariant holds at every
   scale; 10k headless tick ≈ 55 ms).
 - **Concurrency: PASS (live).** 5 concurrent unthrottled `tickOnce` — all 5
@@ -338,8 +363,8 @@ cleanup → reset → concurrency → 10/100/1k/10k benches → audit → cleanu
   (`harness:invariantAudit`), Batch/Reservation production compliance, clean
   world baseline (`harness:resetWorld`), Sprint 2.6 concurrency-verified tick
   and sharded scaling (`ROBOTS_PER_TICK` + sharded burn), exactly-once burn
-  slices (`advanceBurn` contract fix), and a complete headless test suite
-  (55 tests) that passes.
+  slices (`advanceBurn` contract fix), Sprint 2.10 storage/battery cost
+  rebalance, and a complete headless test suite (92 tests) that passes.
 - **Blocked (platform):** the dev deployment is DISABLED (usage limit exceeded
   during the previous Sprint 2.6 session) and still holds stranded `LOADTEST`
   players. Re-enable/raise the limit in the Convex dashboard, run

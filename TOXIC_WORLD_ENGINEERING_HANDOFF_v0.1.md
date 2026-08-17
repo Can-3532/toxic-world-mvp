@@ -107,9 +107,26 @@ TOX_PER_TON, WORLD_COLLAPSE_TARGET) are frozen there. Code: `gameParams.ts`
 | Decision | Result | Evidence |
 |---|---|---|
 | 1 — throughput reference | **SEPARATED.** `STARTER_OBSERVED_THROUGHPUT_KG_H = 174.4` (measured 174.38; informational only) is officially NOT the Model C demand reference. `DEMAND_REF_KG_H = 42` remains the deliberate scarcity lever ⇒ demand/gen ratio sits at the 5% replenishment floor (frozen behavior; re-anchor deferred to a balance sprint) | `gameParams.ts` comments + freeze doc §2 |
-| 2 — 500 TOX/t | **KEPT.** Sensitivity 250/350/500/650 measured bucket-by-bucket (normal ×tpt, zone ×tpt×1.2; kg split derived from toxFromNormal/toxFromZone): L2 = 3.26/2.33/**1.63**/1.25 game-h, L5 = 26.65/19.03/**13.32**/10.25 game-h, daily TOX (game-day) = 1,103/1,545/**2,207**/2,869, full-tree sink ratio = 3.85/2.75/**1.92**/1.48 game-days. 500 row reproduces the 2.8 baseline to machine precision. Burn split: 174.38 kg/game-h = 126.82 normal + 47.56 zone ⇒ **31.0% of TOX from Burn Zones** | `economyValidation.test.ts` DECISION 2 test + console table |
+| 2 — 500 TOX/t | **KEPT.** Sensitivity 250/350/500/650 measured bucket-by-bucket (normal ×tpt, zone ×tpt×1.2; kg split derived from toxFromNormal/toxFromZone): L2 = 3.26/2.33/**1.63**/1.25 game-h, L5 = 26.65/19.03/**13.32**/10.25 game-h, daily TOX (game-day) = 1,103/1,545/**2,207**/2,869, full-tree sink ratio = **3.05/2.18/1.52/1.17** game-days (recomputed after the Sprint 2.10 storage/battery rebalance; was 3.85/2.75/1.92/1.48 with the 4,245-TOX placeholder tree). 500 row reproduces the 2.8 baseline to machine precision. Burn split: 174.38 kg/game-h = 126.82 normal + 47.56 zone ⇒ **31.0% of TOX from Burn Zones** | `economyValidation.test.ts` DECISION 2 test + console table |
+| 3c — P1 costs (Sprint 2.10) | Storage/Battery costs REBALANCED (see SPRINT 2.10 below) — the freeze left them open; the placeholders inverted progression (storage 1,780 > cargo 1,225). | rebalance doc + `storageBatteryValidation.test.ts` |
 | 3 — collapse tempo | **Real curve measured; WORLD_COLLAPSE_TARGET left OPEN** (no target forced in 2.9). 1K (diligent auto-queue): net NEGATIVE at every activity level ⇒ never collapses (2.8's 102.7 game-h was the no-queue upper bound; the lower bound is ∞). 5K: 50→90 ≈ 23.2, 90→100 ≈ 5.9 game-h (25–100% activity varies < 10%). 10K: 8.8 + 2.3 game-h ≈ **0.92 real-h total collapse**. Activity independence ⇒ **collection is cluster-limited** (spawn cap 25/tick, 500-cluster target), not activity-limited | `economyValidation.test.ts` DECISION 3 tests |
 | 3b — new measured tradeoff | The Sprint 2.6 sharded robot loop (`ROBOTS_PER_TICK = 2500`) throttles per-player collection ~3.3× at 10K (~5.4 kg/game-h/player, shardCount 4) vs 5K (~18 kg/game-h/player, shardCount 2) — the write-budget fix now has a quantified throughput cost at high population. Flagged in freeze doc §4 finding 4 | collapse matrix collection column |
+
+## SPRINT 2.10 — STORAGE & BATTERY P1 REBALANCE (freeze v0.1)
+
+Freeze doc: **`TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md`** — the P1
+open item from Design Freeze v0.3, resolved with measured track value on the
+oracle sim (seed 42 = the 2.9 frozen baseline). Code: `gameParams.ts`
+`UPGRADES.storage/battery.costs` + `tests/storageBatteryValidation.test.ts`
+(10 tests). Caps/mechanics unchanged — cost-only rebalance.
+
+| Decision | Result | Evidence |
+|---|---|---|
+| The problem | Placeholders inverted progression: storage total 1,780 > cargo total 1,225 (buffer cost more than throughput), battery 1,080 nearly cargo-priced | freeze + handoff §9 |
+| Cargo (frozen) | THE throughput track: burned 174.38 → 587.52 kg/game-h across L1→L5 (3.4×), strictly increasing. Remains the #1 sink (150/225/340/510 unchanged) | cargo axis test |
+| Storage | The check-in/AFK buffer. On a 1 game-h check-in cadence, L1 (60 kg) stalls **71.5%** of real time (57.5 kg/game-h); L3 (160 kg) recovers to 149.3 (~91% of diligent); L4+ stalls 0%. → **120/190/300/460 (total 1,070)** | storage axis test |
+| Battery | The range/uptime track. For a diligent starter the cap alone moves recharge dead time 7.71% → 6.81% (+0.5% throughput); the frozen recharge RATE is the real dead-time fix (7.71% → 2.15% sweeping recharge). → **100/160/250/400 (total 910)** | battery + recharge axis tests |
+| New order | cargo 1,225 > storage 1,070 > battery 910 > recharge 160; total sink 3,365 TOX → **1.52 game-days** (was 1.92). Tests pin the exact arrays + the ordering rules | §4 tests |
 
 ## SPRINT 2.7 — TICK ARCHITECTURE (A/B/C decision, measured on dev)
 
@@ -401,8 +418,8 @@ remain only as DEPRECATED legacy aliases.)
 | Settlement fee | n/a — no SOL settlement path remains | — | — | — |
 | Cargo costs | 150/225/340/510 | gameParams | `UPGRADES.cargo.costs` | FREEZE |
 | Recharge costs | 20/30/45/65 | gameParams | `UPGRADES.recharge.costs` | FREEZE |
-| Storage costs | 200/320/500/760 | gameParams | `UPGRADES.storage.costs` | PLACEHOLDER (freeze left open → P1) |
-| Battery costs | 120/190/300/470 | gameParams | `UPGRADES.battery.costs` | PLACEHOLDER (freeze left open → P1) |
+| Storage costs | 120/190/300/460 | gameParams | `UPGRADES.storage.costs` | **FROZEN P1 v0.1 (Sprint 2.10)** — was 200/320/500/760 placeholder |
+| Battery costs | 100/160/250/400 | gameParams | `UPGRADES.battery.costs` | **FROZEN P1 v0.1 (Sprint 2.10)** — was 120/190/300/470 placeholder |
 | Base Lock | — | — | — | NOT IMPLEMENTED |
 | AFK Protection | — | — | — | NOT IMPLEMENTED |
 | Toxic Shield | — | — | — | NOT IMPLEMENTED |
@@ -414,7 +431,8 @@ remain only as DEPRECATED legacy aliases.)
 
 | TEST | FILE | COMMAND | VALIDATES | PASS/FAIL | LAST VERIFIED |
 |---|---|---|---|---|---|
-| v0.4 reward formulas (26 tests) | `tests/economy.test.ts` | `bun test tests/economy.test.ts` | 500/600 TOX per ton, fractions, idempotency keys + `advanceBurn` duplicate-slice contract, no-SOL path, pollution 1:1, starter 460 TOX/day, cargo progression times | **26 PASS / 0 FAIL** (45 assertions) | Sprint 2.6 continuation |
+| v0.4 reward formulas (26 tests) | `tests/economy.test.ts` | `bun test tests/economy.test.ts` | 500/600 TOX per ton, fractions, idempotency keys + `advanceBurn` duplicate-slice contract, no-SOL path, pollution 1:1, starter 460 TOX/day, cargo progression times | **26 PASS / 0 FAIL** | Sprint 2.6 continuation |
+| Storage/Battery rebalance (10 tests) | `tests/storageBatteryValidation.test.ts` | `bun test tests/storageBatteryValidation.test.ts` | battery/recharge/storage/cargo axis sweeps (recharge share, stall share, throughput), rebalanced cost pins, priority order, progression ROI, sink ratio | **10 PASS / 0 FAIL** | Sprint 2.10 |
 | Engine harness (29 tests) | `tests/engine.test.ts` + `tests/engineSim.ts` | `bun test tests/engine.test.ts` | two-layer invariant every tick, pollution %, Model C, Batch/Reservation (floor access, no dup, determinism, prod==reference), burn reward normal/zone, idempotency, collapse+reset, critical recovery, active/inactive scaling, scale 10→10k | **29 PASS / 0 FAIL** (134 assertions) | Sprint 2.6 continuation |
 | Convex codegen + deploy | — | `bunx convex dev --once` | functions compile & deploy to dev | **PASS** (exit 0) | this turn |
 | Whole-project typecheck | — | `bunx tsc -b --noEmit` | TS across frontend + backend | **PASS** (exit 0) | this turn |
@@ -473,7 +491,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | Batch Allocation | `world.ts` tick §2 via `engine.ts` `batchAllocation` | ✅ DONE (Sprint 2.5) | level-ordered floor access, battery-feasible, deterministic, no duplicate reservation; prod == reference tested |
 | Cargo costs 150/225/340/510 | `UPGRADES.cargo.costs` | ✅ | |
 | Recharge costs 20/30/45/65 | `UPGRADES.recharge.costs` | ✅ | |
-| Storage/Battery remain P1 | `UPGRADES.storage/battery.costs` | ⚠️ DEVIATION | freeze left open; filled with MVP placeholders (200/320/500/760, 120/190/300/470), flagged P1 |
+| Storage/Battery costs | `UPGRADES.storage/battery.costs` | ✅ (Sprint 2.10) | P1 open item resolved: rebalanced 120/190/300/460 + 100/160/250/400 from measured track value (rebalance doc v0.1) |
 | Critical = 90% | `CRITICAL_FRAC`, `tick` §6 | ✅ | |
 | Collapse = 100% | `tick` §6 | ✅ | |
 | No collapse countdown | `tick` §6 | ✅ | immediate reset |
@@ -510,7 +528,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 
 | # | TASK | ROLE | DEPENDENCY | OUTPUT | ACCEPTANCE CRITERIA |
 |---|---|---|---|---|---|
-| 1 | Storage/Battery P1 rebalance | Economy | — | `gameParams.ts` update | Playtest data; storage pressure + progression ROI measured |
+| ~~1~~ ✅ | Storage/Battery P1 rebalance | Economy | — | **DONE (Sprint 2.10)** — `gameParams.ts` + rebalance doc + 10 tests | Storage pressure + progression ROI measured and frozen |
 | 2 | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | schema + tick logic + UI | Each system has test + UI state |
 | 3 | Concurrency hardening of `tick` (atomic guard) | Backend | — | atomic CAS or serialized tick | Double-advance impossible under concurrent calls |
 | 4 | Real Solana entry rail (0.1 SOL base purchase) | Backend/Frontend | — | Coinbase Commerce or wallet SDK; server-side verification | Purchase verified on devnet; base granted only on confirmation; burn still pays TOX only |
@@ -582,7 +600,10 @@ had leaked ~13.5 t of phantom pool mass.
    p50 ≈ 3.1–3.4 s vs the < 1 s target (dev-deployment per-doc overhead
    dominates; headless 10k sim ≈ 55 ms/tick). Path options in
    NEXT IMMEDIATE TASK.
-5. Storage/Battery upgrade costs are P1 placeholders awaiting rebalance.
+5. ~~Storage/Battery upgrade costs are P1 placeholders awaiting rebalance.~~
+   **RESOLVED (Sprint 2.10)** — rebalanced and frozen in
+   `TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md`; playtest confirmation is
+   the remaining (non-blocking) follow-up.
 
 (Resolved in Sprint 2.6: the non-atomic tick guard was verified SAFE under
 concurrency — double-advance cannot occur; no guard fix needed. Continuation
@@ -609,8 +630,9 @@ idempotency-contract fix, both covered by the headless suite.)
 3. **Design follow-up — Model C reference RESOLVED (Sprint 2.9):** frozen at
    42 kg/game-h as a deliberate scarcity lever (`TOXIC_WORLD_STARTER_ECONOMY_
    RECALIBRATION_v0.1.md`); re-anchoring is a future balance-sprint option,
-   not a pre-launch blocker. Remaining pre-launch design items: pick
-   `WORLD_COLLAPSE_TARGET` from the Sprint 2.9 curve (freeze doc §4), then
-   rebalance Storage/Battery P1 costs with the measured progression rates
-   (game-h and real-h columns, freeze doc §3).
+   not a pre-launch blocker. **Storage/Battery P1 costs RESOLVED (Sprint
+   2.10):** rebalanced with the measured progression rates (`TOXIC_WORLD_
+   STORAGE_BATTERY_REBALANCE_v0.1.md`, game-h/real-h columns in §4).
+   Remaining pre-launch design item: pick `WORLD_COLLAPSE_TARGET` from the
+   Sprint 2.9 curve (freeze doc §4).
 4. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.

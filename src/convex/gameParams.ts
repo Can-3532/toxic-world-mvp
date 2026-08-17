@@ -95,7 +95,21 @@ export const ROBOT = {
   BATTERY_SAFETY_MARGIN: 5, // extra battery kept for the return trip
 } as const;
 
-// Upgrade tracks — costs are from Design Freeze v0.3 (UNCHANGED in v0.4).
+// Upgrade tracks — costs are from Design Freeze v0.3 (UNCHANGED in v0.4)
+// except Storage/Battery, which the freeze left OPEN (P1) and were carrying
+// MVP placeholders until Sprint 2.10 (TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_
+// v0.1.md). The rebalance fixed the placeholder inversion (storage cost MORE
+// than the throughput track) using measured track value on the oracle sim:
+//   - Cargo (frozen): the throughput track — burn 163.6 -> 596.3 kg/game-h
+//     across L1..L5 (measured). Primary sink.
+//   - Storage (rebalanced): the check-in/AFK buffer. At a 1 game-hour
+//     check-in cadence, L1 stalls 66.7% of real time (57.5 kg/game-h); L3
+//     recovers to ~91% of the diligent baseline; L4+ fully. Priced just
+//     below cargo (buffer, not throughput).
+//   - Battery (rebalanced): the range/uptime track. For a diligent starter
+//     the cap alone moves recharge dead time 8.1% -> 6.7% (short trips); its
+//     real value scales with map sparsity and AFK. Priced below storage.
+//   - Recharge (frozen): the dead-time fix (L1 5/s -> L5 26/s). Cheap QoL.
 // costs[L] = TOX price to go from level L to L+1 (costs[5] unused).
 export const UPGRADES = {
   cargo: {
@@ -116,14 +130,21 @@ export const UPGRADES = {
     label: "Battery",
     icon: "battery",
     description: "Longer sorties without refuel",
-    costs: [0, 120, 190, 300, 470],
+    // SPRINT 2.10 P1 REBALANCE: was 120/190/300/470 (total 1,080 — nearly
+    // cargo-priced for a support track). New 100/160/250/400 (total 910):
+    // measured starter value is modest (recharge share 8.1% -> 6.7% across
+    // the cap alone); the cap is a range/uptime track, priced below storage.
+    costs: [0, 100, 160, 250, 400],
     caps: [100, 150, 220, 320, 460], // battery units per level 1..5
   },
   storage: {
     label: "Storage",
     icon: "warehouse",
     description: "More waste held before processing",
-    costs: [0, 200, 320, 500, 760],
+    // SPRINT 2.10 P1 REBALANCE: was 200/320/500/760 (total 1,780 — ABOVE the
+    // frozen cargo track, an inversion). New 120/190/300/460 (total 1,070),
+    // the measured check-in/AFK buffer value (see rebalance doc §2).
+    costs: [0, 120, 190, 300, 460],
     caps: [60, 100, 160, 260, 420], // kg per level 1..5
   },
 } as const;

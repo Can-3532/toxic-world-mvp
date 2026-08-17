@@ -7,7 +7,8 @@ Measured on: deterministic headless oracle sim (`tests/engineSim.ts` → mirrors
 `src/convex/world.ts` on the same pure functions `engine.ts` / `economy.ts` /
 `gameParams.ts`), 5 s tick (Sprint 2.7 B), 1 game-min/tick, 12× compression.
 Verification: `bun test tests/economyValidation.test.ts` — 27 pass / 0 fail;
-full suite `bun test tests/` — 82 tests / 4,418 assertions, 0 fail.
+full suite `bun test tests/` — 92 tests / 67,846 assertions, 0 fail (after
+Sprint 2.10, which added `tests/storageBatteryValidation.test.ts`).
 
 ---
 
@@ -45,18 +46,24 @@ metric from the 2.8 zone test).
 
 | TOX/t | L2 time (game-h / real-h) | L5 time (game-h / real-h) | daily TOX (game-day) | daily TOX (real-day) | TOX sink ratio (game-days to max all tracks) |
 |---|---|---|---|---|---|
-| 250 | 3.26 / 0.27 | 26.65 / 2.22 | 1,103 | 13,240 | 3.85 |
-| 350 | 2.33 / 0.19 | 19.03 / 1.59 | 1,545 | 18,536 | 2.75 |
-| **500** | **1.63 / 0.14** | **13.32 / 1.11** | **2,207** | **26,480** | **1.92** |
-| 650 | 1.25 / 0.10 | 10.25 / 0.85 | 2,869 | 34,424 | 1.48 |
+| 250 | 3.26 / 0.27 | 26.65 / 2.22 | 1,103 | 13,240 | 3.05 |
+| 350 | 2.33 / 0.19 | 19.03 / 1.59 | 1,545 | 18,536 | 2.18 |
+| **500** | **1.63 / 0.14** | **13.32 / 1.11** | **2,207** | **26,480** | **1.52** |
+| 650 | 1.25 / 0.10 | 10.25 / 0.85 | 2,869 | 34,424 | 1.17 |
+
+> Sink-ratio column recomputed in Sprint 2.10: the Storage/Battery P1 rebalance
+> (TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md) cut the full upgrade-tree
+> cost from 4,245 to 3,365 TOX. TOX/ton values are untouched; only the sink
+> numbers shift (total sink / daily TOX).
 
 Monotonicity verified: higher TOX/t ⇒ faster upgrades and lower sink ratio.
 500 reproduces the 2.8 baseline exactly (L2 1.63, L5 13.32, 2,206.7/day).
 
 **Decision: keep 500 TOX/t.** At 500, a starter maxes the full upgrade tree
-(all 4 tracks = 4,245 TOX) in **1.92 game-days** (~3.8 real hours of active
-play at 12× compression). 250–650 bracket is documented for any future
-rebalance; the sink ratio table is the reference.
+(all 4 tracks = 3,365 TOX after the Sprint 2.10 storage/battery rebalance) in
+**1.52 game-days** (~3.0 real hours of active play at 12× compression).
+250–650 bracket is documented for any future rebalance; the sink ratio table
+is the reference.
 
 ## 4. DECISION 3 — World collapse tempo (real curve, no target forced)
 
@@ -122,4 +129,6 @@ cluster-limited pool allows; `autoFraction` only gates who is active.
       the Convex deployment (headless oracle is the authority until then).
 - [ ] Model C demand reference re-anchor debate (42 vs measured) — deliberately
       deferred; the 5% floor is frozen behavior.
-- [ ] Storage/Battery P1 rebalance uses the new daily-TOX + sink-ratio numbers.
+- [x] Storage/Battery P1 rebalance uses the new daily-TOX + sink-ratio numbers
+      — **DONE in Sprint 2.10** (`TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md`
+      + `tests/storageBatteryValidation.test.ts`); sink column above recomputed.
