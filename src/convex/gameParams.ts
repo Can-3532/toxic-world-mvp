@@ -42,7 +42,18 @@ export const WORLD = {
   CLUSTER_MAX_KG: 900,
   MAX_CLUSTER_SPAWNS_PER_TICK: 25,
   PROCESSING_KG_PER_S: 2, // burn rate (kg / real second)
-  DEMAND_REF_KG_H: 42, // starter robot throughput reference (kg / game hour)
+  // SPRINT 2.9 FREEZE (TOXIC_WORLD_STARTER_ECONOMY_RECALIBRATION_v0.1):
+  // DEMAND_REF_KG_H is a DELIBERATE conservative design lever for Model C —
+  // it is officially NOT the measured starter throughput (which measures
+  // ~174.4 kg/game-h, see STARTER_OBSERVED_THROUGHPUT_KG_H). With the 42
+  // reference the demand/gen ratio sits at the 5% replenishment floor in
+  // practice; that is the frozen behavior, and re-anchoring it to measured
+  // throughput is explicitly deferred to a future balance sprint.
+  DEMAND_REF_KG_H: 42,
+  // SPRINT 2.9 FREEZE — measured emergent throughput of a lone L1 starter on a
+  // stocked map (24 game-h deterministic sim, diligent queue policy).
+  // Informational only: Model C uses DEMAND_REF_KG_H, never this value.
+  STARTER_OBSERVED_THROUGHPUT_KG_H: 174.4,
   BATCH_SIZE: 20, // Batch/Reservation: robots per allocation batch (Sprint 2.5)
   // Sprint 2.6 scaling: Convex caps one mutation at ~4,096 DB ops, so a tick
   // that patches every robot tops out around 3.5k players. Worlds beyond this

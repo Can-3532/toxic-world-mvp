@@ -128,7 +128,7 @@ Conversions (5 s tick, 1 game-min/tick): `1 game-h = 60 ticks = 5 real-min`;
 ## Tests
 
 ```bash
-bun test tests/                 # all 69 tests (26 economy + 29 engine + 14 economy-validation), 3,686 assertions
+bun test tests/                 # all 82 tests (26 economy + 29 engine + 27 economy-validation), 4,418 assertions
 bun test tests/engine.test.ts   # production engine test harness (Sprint 2.4 + 2.5 + 2.6)
 bun test tests/economy.test.ts  # v0.4 reward formulas, idempotency, pollution accounting
 bun test tests/economyValidation.test.ts  # Sprint 2.8: 5 s-tick economy (two time axes)
@@ -205,6 +205,30 @@ Findings:
    collapse; the numbers are an upper bound.
 5. **Storage (starter):** fill ≈ 0.35 game-h, ~8.8 unloads/game-h, processing
    backlog ≤ 20 kg (burner clears a full 60 kg storage in 30 real-s).
+
+### Sprint 2.9 — starter economy & Model C recalibration (freeze v0.1)
+
+`bun test tests/economyValidation.test.ts` — 27 tests, green. Freeze doc:
+**`TOXIC_WORLD_STARTER_ECONOMY_RECALIBRATION_v0.1.md`** (single source of
+truth for the four values). Decisions:
+
+1. **Throughput reference — SEPARATED.** `STARTER_OBSERVED_THROUGHPUT_KG_H =
+   174.4 kg/game-h` (measured, informational only) is officially NOT the
+   Model C demand reference; `DEMAND_REF_KG_H = 42` stays as the deliberate
+   scarcity lever → the demand/gen ratio sits at the 5% replenishment floor
+   (frozen behavior; re-anchor deferred).
+2. **500 TOX/t — KEPT.** Sensitivity 250/350/500/650 measured bucket-by-bucket
+   (zone ×1.2 applied to the zone kg split): at 500 TOX/t, L2 = 1.63 game-h,
+   L5 = 13.32 game-h, daily TOX = 2,206.7 (game-day) / 26,480 (real-day),
+   full upgrade-tree sink = 1.92 game-days. 31.0% of starter TOX comes from
+   Burn Zones. The 500 row reproduces the 2.8 baseline to machine precision.
+3. **Collapse tempo — real curve, target left OPEN.** 1K diligent players ⇒
+   net NEGATIVE pollution (never collapses); 5K ⇒ 50→90 ≈ 23.2 game-h, 90→100
+   ≈ 5.9 game-h; 10K ⇒ 8.8 + 2.3 game-h (≈ 0.92 real-h total). Activity
+   25–100% changes collection < 10% — collection is **cluster-limited**, not
+   activity-limited. New measured tradeoff: the Sprint 2.6 sharded robot loop
+   throttles per-player collection ~3.3× at 10K vs 5K (ROBOTS_PER_TICK
+   sharding is now quantified).
 
 ### Sprint 2.7 — tick architecture (A/B/C decision)
 

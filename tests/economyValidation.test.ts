@@ -13,7 +13,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { replenishmentModelC } from "../src/convex/engine";
-import { WORLD, CARGO_CUMULATIVE_TOX, TOX_PER_TON } from "../src/convex/gameParams";
+import {
+  BURN_ZONE_MULTIPLIER,
+  CARGO_CUMULATIVE_TOX,
+  TOX_PER_TON,
+  UPGRADES,
+  WORLD,
+} from "../src/convex/gameParams";
 import { Sim, makePlayer, makePlayers } from "./engineSim";
 
 const EPS = 1e-6;
@@ -301,6 +307,177 @@ describe("5. pollution scenarios under the 5 s tick", () => {
         + ` | collapse ≈ ${fmt(collapseGameH)} game-h (${fmt(collapseGameH / GAME_HOURS_PER_REAL_HOUR)} real-h)`
         + ` | pollution ${fmt((sim.world.pollutionKg / WORLD.CAPACITY_KG) * 100)}%`);
     });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SPRINT 2.9 — DECISION 2: TOX/ton sensitivity (250 / 350 / 500 / 650)
+// ---------------------------------------------------------------------------
+// Collection/burn KG rates are TOX-independent, so ONE starter run is scaled
+// linearly; only the TOX-derived quantities change with TOX_PER_TON.
+
+function starterRun(gameHours: number): {
+  p: ReturnType<typeof makePlayer>;
+  sim: Sim;
+} {
+  const p = makePlayer("starter", { base: true, level: 1, x: 500, y: 500, auto: true });
+  const sim = new Sim({ players: [p], seed: 42 });
+  sim.zone.nextSpawnAt = 1_000_000;
+  // start time MUST match the Sprint 2.8 starter baseline (1_000_000) — the
+  // zone lifecycle draws rng on the spawn tick, shifting cluster layouts
+  const ticks = Math.round((gameHours * 60) / WORLD.GAME_MINUTES_PER_TICK);
+  for (let t = 0; t < ticks; t++) {
+    sim.tick(1_000_000 + t * WORLD.TICK_SECONDS * 1000);
+    if (p.storageKg > 0) {
+      p.processing.queuedKg += p.storageKg;
+      if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
+      p.storageKg = 0;
+    }
+  }
+  return { p, sim };
+}
+
+describe("2.9 decision 2 — TOX/ton sensitivity", () => {
+  test("250 / 350 / 500 / 650 TOX/t: first upgrade, L5, daily TOX, zone, sink ratio", () => {
+    const { p, sim } = starterRun(24);
+    const burnedKgPerGameH = p.totalBurnedKg / 24;
+    const zoneFrac =
+      p.toxFromZone / (p.toxFromNormal + p.toxFromZone);
+    // Recover the NORMAL vs ZONE kg split from the measured TOX buckets at the
+    // current rate (zone burns credit ×BURN_ZONE_MULTIPLIER). Scaling total kg
+    // flat would miss the ×1.2 zone multiplier and drift from the 2.8 baseline.
+    const normalKgGph = (p.toxFromNormal * 1000) / TOX_PER_TON / 24;
+    const zoneKgGph =
+      (p.toxFromZone * 1000) / (TOX_PER_TON * BURN_ZONE_MULTIPLIER) / 24;
+    // self-consistency: the split recombines into the measured total
+    expect(normalKgGph + zoneKgGph).toBeCloseTo(burnedKgPerGameH, 9);
+    const totalSink = Object.values(UPGRADES).reduce(
+      (s, u) => s + u.costs.reduce((a, b) => a + b, 0),
+      0,
+    ); // cargo 1225 + recharge 160 + battery 1080 + storage 1780 = 4245
+    const l2Cost = CARGO_CUMULATIVE_TOX[0]; // 150
+    const l5Cost = CARGO_CUMULATIVE_TOX[3]; // 1225
+
+    console.log("── DECISION 2 — TOX/ton sensitivity (starter, measured) ──────────");
+    console.log(`  burned: ${fmt(burnedKgPerGameH)} kg/game-h`
+      + ` (normal ${fmt(normalKgGph)} + zone ${fmt(zoneKgGph)})`
+      + ` | zone contribution: ${fmt(zoneFrac * 100)}% of TOX`);
+    console.log(
+      "  TOX/t | first upgrade (L2) | L5 time | daily TOX (game-day) | daily TOX (real-day) | sink ratio (game-days)",
+    );
+    const rows: Record<string, number>[] = [];
+    for (const tpt of [250, 350, 500, 650]) {
+      // each bucket scales with its own rate: normal ×tpt, zone ×tpt×1.2
+      const toxGph =
+        (normalKgGph * tpt) / 1000 +
+        (zoneKgGph * tpt * BURN_ZONE_MULTIPLIER) / 1000;
+      const l2GameH = l2Cost / toxGph;
+      const l5GameH = l5Cost / toxGph;
+      const dailyGame = toxGph * 24;
+      const dailyReal = dailyGame * GAME_HOURS_PER_REAL_HOUR;
+      const sinkRatio = totalSink / dailyGame;
+      rows.push({ tpt, l2GameH, l5GameH, dailyGame, dailyReal, sinkRatio });
+      console.log(
+        `  ${String(tpt).padStart(5)}  | ${fmt(l2GameH).padStart(7)} game-h`
+          + ` (${fmt(l2GameH / GAME_HOURS_PER_REAL_HOUR).padStart(6)} real-h)`
+          + ` | ${fmt(l5GameH).padStart(7)} game-h`
+          + ` (${fmt(l5GameH / GAME_HOURS_PER_REAL_HOUR).padStart(6)} real-h)`
+          + ` | ${fmt(dailyGame).padStart(9)}`
+          + ` | ${fmt(dailyReal).padStart(10)}`
+          + ` | ${fmt(sinkRatio).padStart(8)}`,
+      );
+    }
+    // invariant + monotonicity: higher TOX/t ⇒ faster upgrades, lower sink ratio
+    expect(rows[0].l2GameH).toBeGreaterThan(rows[1].l2GameH);
+    expect(rows[1].l2GameH).toBeGreaterThan(rows[2].l2GameH);
+    expect(rows[2].l2GameH).toBeGreaterThan(rows[3].l2GameH);
+    expect(rows[0].sinkRatio).toBeGreaterThan(rows[3].sinkRatio);
+    // frozen 500 TOX/t row must reproduce the Sprint 2.8 numbers (both axes)
+    expect(rows[2].l2GameH).toBeCloseTo(1.63, 1);
+    expect(rows[2].l5GameH).toBeCloseTo(13.32, 1);
+    expect(rows[2].dailyGame).toBeCloseTo(2206.7, 0);
+    expect(rows[2].dailyReal).toBeCloseTo(2206.7 * GAME_HOURS_PER_REAL_HOUR, 0);
+    // the 500 row reconstructs the measured TOX exactly (zone multiplier included)
+    expect(rows[2].dailyGame).toBeCloseTo(p.toxBalance, 9);
+    const inv = sim.invariant();
+    expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
+    expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPRINT 2.9 — DECISION 3: WORLD COLLAPSE TEMPO (N players × active %)
+// ---------------------------------------------------------------------------
+// Real curve, no target forced: 50%→90% and 90%→100% durations for
+// 1,000 / 5,000 / 10,000 players at 100 / 75 / 50 / 25% activity.
+// Synthetic players queue their storage like a diligent player (max burn), so
+// these are the LOWER bounds on collapse times (upper bound = 2.8 no-queue
+// numbers).
+
+function autoQueueAll(sim: Sim): void {
+  for (const p of sim.players) {
+    if (p.storageKg > 0) {
+      p.processing.queuedKg += p.storageKg;
+      if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:q`;
+      p.storageKg = 0;
+    }
+  }
+}
+
+describe("2.9 decision 3 — world collapse tempo", () => {
+  const configs: { n: number; active: number[] }[] = [
+    { n: 1_000, active: [1, 0.75, 0.5, 0.25] },
+    { n: 5_000, active: [1, 0.75, 0.5, 0.25] },
+    { n: 10_000, active: [1, 0.75, 0.5, 0.25] },
+  ];
+
+  for (const cfg of configs) {
+    for (const active of cfg.active) {
+      test(`${cfg.n} players, ${Math.round(active * 100)}% active`, () => {
+        const seed = cfg.n + Math.round(active * 1000);
+        const players = makePlayers(cfg.n, {
+          seed,
+          autoFraction: active,
+          storageFraction: 0.1,
+          queueFraction: 0,
+        });
+        const sim = new Sim({ players, seed });
+        // warmup 30 ticks (0.5 game-h), measure the next 30 (0.5 game-h)
+        let p30 = 0;
+        for (let t = 0; t < 60; t++) {
+          sim.tick(10_000_000 + t * WORLD.TICK_SECONDS * 1000);
+          autoQueueAll(sim);
+          if (t === 29) p30 = sim.world.pollutionKg;
+          if (t >= 30) {
+            const inv = sim.invariant();
+            expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
+            expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
+          }
+        }
+        const netPerGameH = (sim.world.pollutionKg - p30) * 2; // per 0.5 game-h
+        const pStart = p30;
+        const to90 =
+          netPerGameH > 0
+            ? (WORLD.CAPACITY_KG * WORLD.CRITICAL_FRAC - pStart) / netPerGameH
+            : Infinity;
+        const to100 =
+          netPerGameH > 0
+            ? (WORLD.CAPACITY_KG - WORLD.CAPACITY_KG * WORLD.CRITICAL_FRAC) /
+              netPerGameH
+            : Infinity;
+        const collectedPerGameH =
+          (players.reduce((s, pl) => s + pl.totalCollectedKg, 0) / 0.5);
+        console.log(
+          `── COLLAPSE ${cfg.n} players, ${Math.round(active * 100)}% active ──`
+            + ` collected ${fmt(collectedPerGameH)} kg/game-h`
+            + ` | gen ${fmt(sim.world.generationRateKgH)} kg/game-h`
+            + ` | net ${fmt(netPerGameH)} kg/game-h`
+            + ` | 50→90 ${fmt(to90)} game-h (${fmt(to90 / GAME_HOURS_PER_REAL_HOUR)} real-h)`
+            + ` | 90→100 ${fmt(to100)} game-h (${fmt(to100 / GAME_HOURS_PER_REAL_HOUR)} real-h)`
+            + ` | pollution now ${fmt((sim.world.pollutionKg / WORLD.CAPACITY_KG) * 100)}%`,
+        );
+      });
+    }
   }
 });
 

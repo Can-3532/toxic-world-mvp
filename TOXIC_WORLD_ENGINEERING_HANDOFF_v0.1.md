@@ -1,4 +1,4 @@
-# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7/2.8)
+# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7/2.8, recalibration SPRINT 2.9)
 
 Verified against the repository on disk (Freebuff Web / Vly sandbox).
 Everything below is grounded in actual files; anything not in the repo is
@@ -96,6 +96,20 @@ Key findings:
    remove far more.
 5. Storage (starter): fill ≈ 0.35 game-h, ~8.8 unloads/game-h, max backlog
    20 kg (burner clears 60 kg in 30 real-s).
+
+## SPRINT 2.9 — STARTER ECONOMY & MODEL C RECALIBRATION (freeze v0.1)
+
+Freeze doc: **`TOXIC_WORLD_STARTER_ECONOMY_RECALIBRATION_v0.1.md`** — the
+four Sprint 2.9 values (STARTER_OBSERVED_THROUGHPUT, DEMAND_REFERENCE,
+TOX_PER_TON, WORLD_COLLAPSE_TARGET) are frozen there. Code: `gameParams.ts`
+(Decision 1 constant split) + `tests/economyValidation.test.ts` (27 tests).
+
+| Decision | Result | Evidence |
+|---|---|---|
+| 1 — throughput reference | **SEPARATED.** `STARTER_OBSERVED_THROUGHPUT_KG_H = 174.4` (measured 174.38; informational only) is officially NOT the Model C demand reference. `DEMAND_REF_KG_H = 42` remains the deliberate scarcity lever ⇒ demand/gen ratio sits at the 5% replenishment floor (frozen behavior; re-anchor deferred to a balance sprint) | `gameParams.ts` comments + freeze doc §2 |
+| 2 — 500 TOX/t | **KEPT.** Sensitivity 250/350/500/650 measured bucket-by-bucket (normal ×tpt, zone ×tpt×1.2; kg split derived from toxFromNormal/toxFromZone): L2 = 3.26/2.33/**1.63**/1.25 game-h, L5 = 26.65/19.03/**13.32**/10.25 game-h, daily TOX (game-day) = 1,103/1,545/**2,207**/2,869, full-tree sink ratio = 3.85/2.75/**1.92**/1.48 game-days. 500 row reproduces the 2.8 baseline to machine precision. Burn split: 174.38 kg/game-h = 126.82 normal + 47.56 zone ⇒ **31.0% of TOX from Burn Zones** | `economyValidation.test.ts` DECISION 2 test + console table |
+| 3 — collapse tempo | **Real curve measured; WORLD_COLLAPSE_TARGET left OPEN** (no target forced in 2.9). 1K (diligent auto-queue): net NEGATIVE at every activity level ⇒ never collapses (2.8's 102.7 game-h was the no-queue upper bound; the lower bound is ∞). 5K: 50→90 ≈ 23.2, 90→100 ≈ 5.9 game-h (25–100% activity varies < 10%). 10K: 8.8 + 2.3 game-h ≈ **0.92 real-h total collapse**. Activity independence ⇒ **collection is cluster-limited** (spawn cap 25/tick, 500-cluster target), not activity-limited | `economyValidation.test.ts` DECISION 3 tests |
+| 3b — new measured tradeoff | The Sprint 2.6 sharded robot loop (`ROBOTS_PER_TICK = 2500`) throttles per-player collection ~3.3× at 10K (~5.4 kg/game-h/player, shardCount 4) vs 5K (~18 kg/game-h/player, shardCount 2) — the write-budget fix now has a quantified throughput cost at high population. Flagged in freeze doc §4 finding 4 | collapse matrix collection column |
 
 ## SPRINT 2.7 — TICK ARCHITECTURE (A/B/C decision, measured on dev)
 
@@ -592,8 +606,11 @@ idempotency-contract fix, both covered by the headless suite.)
    Decision matrix: PROD < 1 s → re-evaluate B (could go back to a faster
    tick); PROD ≈ 3 s → B stays; PROD > 5 s → C (spatial sharding) comes into
    play.
-3. **Design follow-up from 2.8 (before launch):** decide the Model C demand
-   reference — re-anchor to measured throughput (~174 kg/game-h starter) or
-   keep 42 as a deliberate scarcity lever; then rebalance Storage/Battery P1
-   costs with the measured progression rates (game-h and real-h columns).
+3. **Design follow-up — Model C reference RESOLVED (Sprint 2.9):** frozen at
+   42 kg/game-h as a deliberate scarcity lever (`TOXIC_WORLD_STARTER_ECONOMY_
+   RECALIBRATION_v0.1.md`); re-anchoring is a future balance-sprint option,
+   not a pre-launch blocker. Remaining pre-launch design items: pick
+   `WORLD_COLLAPSE_TARGET` from the Sprint 2.9 curve (freeze doc §4), then
+   rebalance Storage/Battery P1 costs with the measured progression rates
+   (game-h and real-h columns, freeze doc §3).
 4. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.
