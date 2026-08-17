@@ -1,5 +1,13 @@
-// TOXIC WORLD — economy & world parameters (Design Freeze v0.3)
+// TOXIC WORLD — economy & world parameters (Design Freeze v0.4)
 // Pure constants, safe to import from both the Convex backend and the frontend.
+//
+// v0.4 economy change (this file is the single source of truth):
+//  - SOL burn reward REMOVED. Burn pays out TOX only.
+//  - Normal burn  = 500 TOX / ton burned.
+//  - Burn Zone    = 600 TOX / ton burned (×1.2 while the zone is ACTIVE).
+//  - Financial ROI retired; PROGRESSION ROI (TOX/time) is the KPI.
+//  - SOL remains ONLY on the entry/purchase side: 0.1 SOL base purchase,
+//    which is SIMULATED/MOCK (no wallet, no transaction).
 
 // Time model: the world ticks every TICK_SECONDS real seconds and each tick
 // advances GAME_MINUTES_PER_TICK game minutes (30x compression). All throughput
@@ -13,11 +21,12 @@ export const WORLD = {
   CRITICAL_FRAC: 0.9, // 90% => critical, no countdown
   COLLAPSE_FRAC: 1, // 100% => world collapse
   BASE_GEN_KG_H: 50, // starter base generation (kg / game hour)
-  REWARD_USD_PER_TON: 10, // $10 / ton burn reward reference
-  SOL_PRICE_USD: 150, // display SOL price used to convert rewards
-  BASE_PRICE_SOL: 0.1, // base purchase price
-  GENESIS_GRANT_SOL: 0.1, // demo grant so the loop is playable end-to-end
-  TOX_PER_KG: 1, // burn yield for the upgrade currency
+  BASE_PRICE_SOL: 0.1, // base purchase price — MOCK (simulated, no tx)
+  GENESIS_GRANT_SOL: 0.1, // demo grant so the loop is playable end-to-end — MOCK
+  // DEPRECATED (v0.3) — burn no longer pays SOL. Kept only so legacy frontends
+  // that reference it still compile; v0.4 code must NOT use this value.
+  REWARD_USD_PER_TON: 10,
+  TOX_PER_KG: 1, // legacy alias (1 TOX/kg = 1000 TOX/ton); kept for compat
   MAP_SIZE: 1000, // map is 1000 x 1000 units
   TICK_SECONDS: 2, // real seconds between world ticks
   GAME_MINUTES_PER_TICK: 1, // game minutes advanced per tick
@@ -29,9 +38,23 @@ export const WORLD = {
   DEMAND_REF_KG_H: 42, // starter robot throughput reference (kg / game hour)
 } as const;
 
-// Replenishment — Dynamic Model C (Design Freeze v0.3)
-// ratio = activeRobotDemand / totalBaseGeneration
-// replenishment = clip(0.05 * ratio, 0.05, 0.09)  [fraction of hidden pool / game hour]
+// --- v0.4 reward economy ---------------------------------------------
+export const TOX_PER_TON = 500; // 1 ton burned waste = 500 TOX (normal burn)
+export const BURN_ZONE_MULTIPLIER = 1.2; // Burn Zone: ×1.2 => 600 TOX / ton
+
+// Burn Zone lifecycle (real seconds) — server-side random schedule
+export const BURN_ZONE = {
+  MIN_ACTIVE_S: 15,
+  MAX_ACTIVE_S: 30,
+  MIN_COOLDOWN_S: 45,
+  MAX_COOLDOWN_S: 90,
+} as const;
+
+// --- Progression ROI validation references (NOT hard-coded gameplay) ---
+// Cumulative TOX to reach each Cargo level (L2 150, L3 +225, L4 +340, L5 +510).
+export const CARGO_CUMULATIVE_TOX = [150, 375, 715, 1225] as const;
+
+// --- Replenishment — Dynamic Model C (unchanged from v0.3) ------------
 export const REPLENISHMENT = {
   BASE_FRAC: 0.05,
   MIN_FRAC: 0.05,
@@ -48,8 +71,8 @@ export const ROBOT = {
   BATTERY_SAFETY_MARGIN: 5, // extra battery kept for the return trip
 } as const;
 
-// Upgrade tracks — costs are from Design Freeze v0.3, effects tuned for the
-// spatial engine. costs[L] = TOX price to go from level L to L+1 (costs[5] unused).
+// Upgrade tracks — costs are from Design Freeze v0.3 (UNCHANGED in v0.4).
+// costs[L] = TOX price to go from level L to L+1 (costs[5] unused).
 export const UPGRADES = {
   cargo: {
     label: "Cargo",
@@ -82,10 +105,6 @@ export const UPGRADES = {
 } as const;
 
 export type UpgradeTrack = keyof typeof UPGRADES;
-
-// Derived: reward per kg burned (USD $10/ton at SOL_PRICE_USD)
-export const SOL_PER_KG = WORLD.REWARD_USD_PER_TON / 1000 / WORLD.SOL_PRICE_USD;
-export const USD_PER_KG = WORLD.REWARD_USD_PER_TON / 1000;
 
 // Battery required for a round trip of `dist` units (1 unit = 1 m)
 export function batteryForTrip(dist: number): number {

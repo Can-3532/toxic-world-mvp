@@ -1,7 +1,8 @@
+import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import type { Doc } from "@/convex/_generated/dataModel";
 import type { UpgradeTrack } from "@/convex/gameParams";
-import { REPLENISHMENT, UPGRADES, WORLD } from "@/convex/gameParams";
+import { BURN_ZONE_MULTIPLIER, REPLENISHMENT, TOX_PER_TON, UPGRADES, WORLD } from "@/convex/gameParams";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -17,7 +18,7 @@ import {
   Warehouse,
   Zap,
 } from "lucide-react";
-import { fmtKg, fmtSol, fmtTimeAgo, fmtTox } from "./format";
+import { fmtKg, fmtTimeAgo, fmtTox } from "./format";
 
 type Player = Doc<"players">;
 
@@ -58,12 +59,13 @@ function StatRow({ label, value, accent }: { label: string; value: string; accen
 export type WorldPanelState = {
   world: Doc<"worlds"> | null;
   clusterCount?: number;
+  zone?: Doc<"burnZones"> | null;
 };
 
 export type LeaderboardRow = {
   name: string;
   burnedKg: number;
-  earnedSol: number;
+  toxEarned: number;
 };
 
 export type EventRow = {
@@ -102,6 +104,20 @@ export function Panels({
   const batteryCap = me ? UPGRADES.battery.caps[me.levels.battery - 1] : 0;
   const queued = me?.processing.queuedKg ?? 0;
 
+  const toxLifetime = (me?.toxFromNormal ?? 0) + (me?.toxFromZone ?? 0);
+
+  // "TOX earned this session" = rewards landed while this page is open
+  const sessionStart = useRef<number | null>(null);
+  useEffect(() => {
+    if (me && sessionStart.current === null) {
+      sessionStart.current = (me.toxFromNormal ?? 0) + (me.toxFromZone ?? 0);
+    }
+  }, [me]);
+  const sessionTox = Math.max(0, toxLifetime - (sessionStart.current ?? 0));
+
+  const zoneActive = world?.zone?.status === "active";
+  const zoneUntil = world?.zone?.expiresAt ?? 0;
+
   return (
     <Tabs defaultValue="base" className="flex h-full flex-col">
       <TabsList className="grid w-full grid-cols-4">
@@ -110,6 +126,14 @@ export function Panels({
         <TabsTrigger value="upgrades">Upgrades</TabsTrigger>
         <TabsTrigger value="world">World</TabsTrigger>
       </TabsList>
+
+      {/* BURN ZONE ALERT */}
+      {zoneActive && (
+        <div className="mt-3 animate-blink rounded-md border border-yellow-400/60 bg-yellow-400/10 px-3 py-2 text-center font-mono text-[10px] font-bold tracking-[0.14em] text-yellow-300">
+          🔥 BURN ZONE ACTIVE — {TOX_PER_TON * BURN_ZONE_MULTIPLIER} TOX / t (×{BURN_ZONE_MULTIPLIER}) until{" "}
+          {Math.max(0, Math.ceil((zoneUntil - Date.now()) / 1000))}s
+        </div>
+      )}
 
       {/* BASE */}
       <TabsContent value="base" className="mt-3 flex-1 space-y-4 overflow-y-auto pr-1">
@@ -148,26 +172,47 @@ export function Panels({
           </div>
           <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
             {queued > 0
-              ? `Burning… ~${Math.max(1, Math.ceil(queued / WORLD.PROCESSING_KG_PER_S))}s to settle rewards.`
-              : "Nothing in the burner. Process stored waste to earn."}
+              ? `Burning… ~${Math.max(1, Math.ceil(queued / WORLD.PROCESSING_KG_PER_S))}s to settle TOX rewards.`
+              : "Nothing in the burner. Process stored waste to earn TOX."}
           </p>
           {queued > 0 && (
             <div className="mt-2">
               <Bar value={queued} max={queued} className="bg-yellow-400" />
             </div>
           )}
+          <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+            <span>normal: {TOX_PER_TON} TOX / t</span>
+            <span className="text-yellow-400">
+              burn zone: {Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} TOX / t
+            </span>
+          </div>
         </div>
 
         <div className="rounded-lg border border-border bg-card/70 p-4">
-          <h3 className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">
-            LIFETIME ECONOMY
+          <h3 className="flex items-center gap-2 font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">
+            <Zap className="size-4 text-yellow-300" /> TOX ECONOMY
           </h3>
           <div className="mt-2 divide-y divide-border/60">
+            <StatRow
+              label="Balance"
+              value={`${fmtTox(me?.toxBalance ?? 0)} TOX`}
+              accent="text-yellow-300"
+            />
+            <StatRow label="Earned this session" value={`${fmtTox(sessionTox)} TOX`} accent="text-primary" />
+            <StatRow label="Earned — normal burns" value={`${fmtTox(me?.toxFromNormal ?? 0)} TOX`} />
+            <StatRow
+              label="Earned — burn zones"
+              value={`${fmtTox(me?.toxFromZone ?? 0)} TOX`}
+              accent="text-yellow-400"
+            />
             <StatRow label="Collected" value={fmtKg(me?.totalCollectedKg ?? 0)} />
             <StatRow label="Burned" value={fmtKg(me?.totalBurnedKg ?? 0)} />
-            <StatRow label="SOL earned" value={`${fmtSol(me?.totalEarnedSol ?? 0)} SOL`} accent="text-primary" />
             <StatRow label="Trips" value={`${me?.robot.totalTrips ?? 0}`} />
           </div>
+          <p className="mt-2 border-t border-border/60 pt-2 font-mono text-[10px] leading-4 text-muted-foreground">
+            DESIGN FREEZE v0.4 · burn pays TOX only — no SOL rewards, ever. SOL exists only on the (mock)
+            base purchase.
+          </p>
         </div>
       </TabsContent>
 
@@ -233,7 +278,7 @@ export function Panels({
             />
           </div>
           <p className="mt-2 text-center font-mono text-[10px] leading-4 text-muted-foreground">
-            AUTO: the robot picks the nearest free cluster itself · 42 kg/h throughput reference
+            AUTO: the robot picks the nearest free cluster itself · 42 kg/h starter throughput reference
           </p>
         </div>
       </TabsContent>
@@ -297,8 +342,10 @@ export function Panels({
           );
         })}
         <p className="px-1 font-mono text-[10px] leading-4 text-muted-foreground">
-          TOX is earned by burning waste (1 TOX / kg). Cargo &amp; recharge prices follow Design Freeze
-          v0.3; storage &amp; battery are MVP-tuned and open to rebalance after playtests.
+          TOX is earned only by burning waste ({TOX_PER_TON} TOX / t,{" "}
+          {Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} TOX / t inside an active Burn Zone). Cargo
+          &amp; recharge prices follow Design Freeze v0.3 (unchanged in v0.4); storage &amp; battery remain
+          P1 — open to rebalance after playtests.
         </p>
       </TabsContent>
 
@@ -328,6 +375,27 @@ export function Panels({
             <span>CRITICAL 90%</span>
             <span className="text-red-500">COLLAPSE 100%</span>
           </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-card/70 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">BURN ZONE</h3>
+            <Badge
+              variant="outline"
+              className={`font-mono text-[10px] ${
+                zoneActive ? "animate-blink border-yellow-400/70 text-yellow-300" : "text-muted-foreground"
+              }`}
+            >
+              {zoneActive ? "ACTIVE ×1.2" : "INACTIVE"}
+            </Badge>
+          </div>
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
+            {zoneActive && world?.zone
+              ? `Located at (${Math.round(world.zone.x)}, ${Math.round(world.zone.y)}) — burns there pay ${
+                  TOX_PER_TON * BURN_ZONE_MULTIPLIER
+                } TOX / t.`
+              : "A random shared zone spawns periodically. While active, waste burned inside pays 1.2× the normal TOX rate."}
+          </p>
         </div>
 
         <div className="rounded-lg border border-border bg-card/70 p-4">
@@ -363,7 +431,7 @@ export function Panels({
                   <span className="max-w-[130px] truncate">{p.name}</span>
                 </span>
                 <span className="font-mono text-[11px] text-muted-foreground">
-                  {fmtKg(p.burnedKg)} · <span className="text-primary">{fmtSol(p.earnedSol)} SOL</span>
+                  {fmtKg(p.burnedKg)} · <span className="text-yellow-300">{fmtTox(p.toxEarned)} TOX</span>
                 </span>
               </div>
             ))}

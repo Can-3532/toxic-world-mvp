@@ -53,14 +53,16 @@ export const ensurePlayer = mutation({
       worldId,
       name: user.name ?? undefined,
       hasBase: false,
-      solBalance: WORLD.GENESIS_GRANT_SOL,
+      solBalance: WORLD.GENESIS_GRANT_SOL, // MOCK — for the base purchase only
       toxBalance: 0,
       genesisGrant: true,
       totalCollectedKg: 0,
       totalBurnedKg: 0,
-      totalEarnedSol: 0,
+      totalEarnedSol: 0, // DEPRECATED (v0.3) — burn no longer pays SOL
+      toxFromNormal: 0,
+      toxFromZone: 0,
       storageKg: 0,
-      processing: { queuedKg: 0, since: 0 },
+      processing: { queuedKg: 0, since: 0, sessionId: undefined, sliceIndex: 0 },
       levels: { cargo: 1, recharge: 1, battery: 1, storage: 1 },
       robot: {
         state: "idle",
@@ -160,7 +162,7 @@ export const toggleAuto = mutation({
   },
 });
 
-/** Move everything in storage into the burner queue. */
+/** Move everything in storage into the burner queue (starts a reward session). */
 export const queueProcessing = mutation({
   args: {},
   handler: async (ctx) => {
@@ -168,12 +170,17 @@ export const queueProcessing = mutation({
     if (!p) throw new Error("Player not found");
     if (p.storageKg <= 0) throw new Error("Storage is empty");
     const now = Date.now();
+    const hasSession = p.processing.queuedKg > 0 && !!p.processing.sessionId;
     const queuedKg = p.processing.queuedKg + p.storageKg;
     await ctx.db.patch(p._id, {
       storageKg: 0,
       processing: {
         queuedKg,
-        since: p.processing.queuedKg > 0 ? p.processing.since : now,
+        since: hasSession ? p.processing.since : now,
+        // one reward session per queue; appending keeps the same id so the
+        // reward ledger keys stay unique per waste unit
+        sessionId: hasSession ? p.processing.sessionId : `${p._id}:${now}`,
+        sliceIndex: hasSession ? p.processing.sliceIndex : 0,
       },
     });
     return { ok: true, queuedKg };
@@ -231,7 +238,7 @@ export const me = query({
   handler: async (ctx) => getPlayer(ctx),
 });
 
-/** Top collectors of the world, by kg burned. */
+/** Top collectors of the world, by kg burned (v0.4: TOX progression metrics). */
 export const leaderboard = query({
   args: {},
   handler: async (ctx) => {
@@ -243,9 +250,10 @@ export const leaderboard = query({
       .map((p) => ({
         name: p.name ?? "Scavenger",
         burnedKg: p.totalBurnedKg,
-        earnedSol: p.totalEarnedSol,
-        tox: p.toxBalance,
+        toxEarned: (p.toxFromNormal ?? 0) + (p.toxFromZone ?? 0),
         worldId: p.worldId,
+        // DEPRECATED (v0.3) — legacy leaderboard field, always 0 under v0.4
+        earnedSol: p.totalEarnedSol ?? 0,
       }));
   },
 });

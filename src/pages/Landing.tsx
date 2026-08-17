@@ -44,7 +44,7 @@ const LOOP_STEPS = [
   { icon: Trash2, title: "Collect", text: "Robots race to clusters (150–900 kg). First come, first reserved." },
   { icon: Warehouse, title: "Storage", text: "Hauled waste piles up — storage pressure is real." },
   { icon: Flame, title: "Process → Burn", text: "Only burning removes waste from the world. 2 kg/s." },
-  { icon: Coins, title: "SOL Reward", text: "$10/ton reference. Burned waste settles straight to your ledger." },
+  { icon: Coins, title: "TOX Reward", text: "500 TOX per ton burned — 600 inside an active Burn Zone. TOX only, never SOL." },
   { icon: TrendingUp, title: "TOX → Upgrade", text: "Cargo, battery, recharge, storage. Grow your throughput." },
 ] as const;
 
@@ -156,7 +156,7 @@ export default function Landing() {
         <motion.div variants={fadeUp}>
           <Badge variant="outline" className="gap-2 border-primary/40 bg-primary/10 px-3 py-1 font-mono text-[11px] tracking-[0.2em] text-primary">
             <Radiation className="size-3.5 animate-pulse-toxic" />
-            MULTIPLAYER SURVIVAL · ECONOMY · SOLANA
+            MULTIPLAYER SURVIVAL · TOX ECONOMY
           </Badge>
         </motion.div>
 
@@ -166,7 +166,7 @@ export default function Landing() {
         >
           The world is drowning.
           <br />
-          <span className="text-primary text-glow-toxic">Burn it for SOL.</span>
+          <span className="text-primary text-glow-toxic">Burn it for TOX.</span>
         </motion.h1>
 
         <motion.p
@@ -251,10 +251,10 @@ export default function Landing() {
         {/* QUICK STATS */}
         <motion.div variants={fadeUp} className="mt-12 grid w-full max-w-3xl grid-cols-2 gap-3 sm:grid-cols-4">
           {[
-            { k: "Base price", v: "0.1 SOL" },
+            { k: "Base price", v: "0.1 SOL*" },
             { k: "Starter generation", v: "50 kg/h" },
-            { k: "Burn reward", v: "$10 / t" },
-            { k: "ROI target", v: "~24h active" },
+            { k: "Burn reward", v: "500 TOX / t" },
+            { k: "Burn Zone", v: "600 TOX / t" },
           ].map((s) => (
             <div key={s.k} className="rounded-md border border-border/70 bg-card/60 px-4 py-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{s.k}</p>
@@ -364,7 +364,7 @@ export default function Landing() {
           className="grid items-start gap-10 lg:grid-cols-2"
         >
           <motion.div variants={fadeUp}>
-            <p className="font-mono text-xs font-semibold tracking-[0.28em] text-primary">ECONOMY · DESIGN FREEZE v0.3</p>
+            <p className="font-mono text-xs font-semibold tracking-[0.28em] text-primary">ECONOMY · DESIGN FREEZE v0.4</p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
               Balanced in simulation, verified by invariant
             </h2>
@@ -385,6 +385,9 @@ export default function Landing() {
             </div>
             <div className="divide-y divide-border">
               {[
+                ["Normal burn reward", "500 TOX / t"],
+                ["Burn Zone reward", "600 TOX / t (×1.2)"],
+                ["SOL burn reward", "REMOVED (v0.4)"],
                 ["World capacity", "10,000 t"],
                 ["World 0 starting pollution", "50%"],
                 ["World 1+ starting pollution", "22.5%"],
@@ -458,9 +461,10 @@ export default function Landing() {
             Your robot is waiting.
           </h2>
           <p className="relative mx-auto mt-4 max-w-xl text-sm leading-6 text-muted-foreground">
-            New players receive a <span className="text-foreground">0.1 SOL genesis grant</span> to deploy
-            their first base in the MVP demo. Balances are simulated — real Solana settlement is the next
-            milestone on the rail.
+            New players receive a <span className="text-foreground">0.1 SOL genesis grant</span> (simulated)
+            to deploy their first base in the MVP demo. SOL exists only on the mock entry side — every kg
+            burned pays <span className="text-foreground">TOX</span>, not SOL. Real Solana settlement remains
+            a future rail.
           </p>
           <div className="relative mt-8 flex flex-wrap items-center justify-center gap-4">
             <Button asChild size="lg" className="cursor-pointer gap-2 px-8 text-base">

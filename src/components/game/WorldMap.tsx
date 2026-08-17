@@ -1,11 +1,12 @@
 import { motion } from "framer-motion";
-import { Bot, House } from "lucide-react";
+import { Bot, Flame, House } from "lucide-react";
 import type { Doc } from "@/convex/_generated/dataModel";
-import { WORLD } from "@/convex/gameParams";
+import { BURN_ZONE_MULTIPLIER, WORLD } from "@/convex/gameParams";
 import { fmtKg } from "./format";
 
 type Cluster = Doc<"wasteClusters">;
 type Player = Doc<"players">;
+type Zone = Doc<"burnZones">;
 
 function clusterSize(kg: number): number {
   return Math.min(24, Math.max(9, Math.sqrt(kg) * 0.62));
@@ -20,15 +21,18 @@ function clusterClass(kg: number): string {
 export function WorldMap({
   clusters,
   me,
+  zone,
   onCommand,
 }: {
   clusters: Cluster[];
   me: Player | null | undefined;
+  zone: Zone | null | undefined;
   onCommand: (clusterId: Cluster["_id"]) => void;
 }) {
   const robot = me?.robot;
   const robotBusy = robot ? robot.state !== "idle" : false;
   const xPct = (v: number) => `${(v / WORLD.MAP_SIZE) * 100}%`;
+  const zoneActive = zone?.status === "active";
 
   return (
     <div className="grid-floor relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-border bg-background sm:aspect-[16/10]">
@@ -56,6 +60,24 @@ export function WorldMap({
           />
         );
       })}
+
+      {/* burn zone */}
+      {zoneActive && zone && (
+        <div
+          className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2"
+          style={{ left: xPct(zone.x), top: xPct(zone.y) }}
+          title={`Burn Zone — ×${zone.multiplier} TOX rewards`}
+        >
+          <span className="absolute -inset-6 animate-ping rounded-full border border-yellow-400/70" />
+          <span className="absolute -inset-3 rounded-full border border-yellow-400/50" />
+          <span className="flex size-10 items-center justify-center rounded-full border border-yellow-400/80 bg-yellow-400/20 text-yellow-300 backdrop-blur-sm">
+            <Flame className="size-5 animate-pulse-toxic" />
+          </span>
+          <span className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap font-mono text-[9px] font-bold tracking-widest text-yellow-300">
+            ×{BURN_ZONE_MULTIPLIER} TOX
+          </span>
+        </div>
+      )}
 
       {/* base */}
       {me?.hasBase && me.baseX != null && me.baseY != null && (
@@ -101,6 +123,9 @@ export function WorldMap({
         </span>
         <span className="flex items-center gap-1.5">
           <span className="size-2.5 rounded-full bg-yellow-400/80" /> big score
+        </span>
+        <span className="flex items-center gap-1.5">
+          <Flame className="size-3 text-yellow-400" /> burn zone ×{BURN_ZONE_MULTIPLIER}
         </span>
         <span className="flex items-center gap-1.5">
           <House className="size-3 text-primary" /> base

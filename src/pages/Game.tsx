@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { WORLD, UPGRADES, type UpgradeTrack } from "@/convex/gameParams";
+import { BURN_ZONE_MULTIPLIER, TOX_PER_TON, WORLD, type UpgradeTrack } from "@/convex/gameParams";
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,15 +10,7 @@ import { WorldMap } from "@/components/game/WorldMap";
 import { Panels } from "@/components/game/Panels";
 import { fmtKg, fmtSol, fmtTox } from "@/components/game/format";
 import { toast } from "sonner";
-import {
-  Biohazard,
-  Coins,
-  House,
-  Loader2,
-  LogOut,
-  Skull,
-  Zap,
-} from "lucide-react";
+import { Biohazard, Coins, Flame, House, Loader2, LogOut, Skull, Zap } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
 function errMsg(e: unknown): string {
@@ -49,6 +41,8 @@ export default function Game() {
   const frac = world?.world ? world.world.pollutionKg / world.world.capacityKg : 0;
   const status = world?.world?.status ?? "safe";
   const critical = frac >= WORLD.CRITICAL_FRAC;
+  const zone = world?.zone ?? null;
+  const zoneActive = zone?.status === "active";
 
   const handleSignOut = async () => {
     await signOut();
@@ -100,7 +94,7 @@ export default function Game() {
   const handleUpgrade = async (track: UpgradeTrack) => {
     try {
       const res = await upgrade({ track });
-      toast.success(`${UPGRADES[track].label} upgraded`, {
+      toast.success(`${track} upgraded`, {
         description: `Now level ${res.level}.`,
       });
     } catch (e) {
@@ -137,7 +131,7 @@ export default function Game() {
                 critical ? "animate-blink border-red-500/60 text-red-400" : "border-primary/40 text-primary"
               }`}
             >
-              {critical ? "⚠ CRITICAL" : "WORLD 0 · LIVE"}
+              {critical ? "⚠ CRITICAL" : zoneActive ? "🔥 BURN ZONE" : "WORLD 0 · LIVE"}
             </Badge>
             <div className="hidden h-2 w-24 overflow-hidden rounded-full bg-muted sm:block">
               <div
@@ -150,34 +144,36 @@ export default function Game() {
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 font-mono text-xs font-bold text-primary">
+            <span
+              title="Simulated demo balance — SOL is used only for the mock base purchase, never for burn rewards"
+              className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 font-mono text-xs font-bold text-primary"
+            >
               <Coins className="size-3.5" />
-              {fmtSol(me.solBalance)} SOL
+              {fmtSol(me.solBalance)} SOL*
             </span>
             <span className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 font-mono text-xs font-bold text-yellow-300">
               <Zap className="size-3.5" />
               {fmtTox(me.toxBalance)} TOX
             </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={handleSignOut}
-              title="Sign out"
-              className="cursor-pointer"
-            >
+            <Button variant="ghost" size="icon" onClick={handleSignOut} title="Sign out" className="cursor-pointer">
               <LogOut className="size-4" />
             </Button>
           </div>
         </div>
-        {critical && (
-          <div className="hazard-stripes-dark h-1.5 w-full" />
-        )}
+        {(critical || zoneActive) && <div className="hazard-stripes-dark h-1.5 w-full" />}
       </header>
 
-      {/* CRITICAL BANNER */}
+      {/* CRITICAL / BURN ZONE BANNER */}
       {critical && (
         <div className="animate-blink border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.2em] text-red-400">
           ☣ WORLD CRITICAL — POLLUTION ABOVE 90%. BURN WASTE OR EVERYTHING COLLAPSES.
+        </div>
+      )}
+      {zoneActive && zone && !critical && (
+        <div className="border-b border-yellow-400/40 bg-yellow-400/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.18em] text-yellow-300">
+          🔥 BURN ZONE ACTIVE at ({Math.round(zone.x)}, {Math.round(zone.y)}) — ×{BURN_ZONE_MULTIPLIER} TOX
+          rewards ({Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} / t) ·{" "}
+          {Math.max(0, Math.ceil((zone.expiresAt - Date.now()) / 1000))}s left
         </div>
       )}
 
@@ -185,7 +181,7 @@ export default function Game() {
       <main className="mx-auto grid w-full max-w-7xl flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_380px]">
         {/* MAP */}
         <div className="relative">
-          <WorldMap clusters={clusters ?? []} me={me} onCommand={handleCommand} />
+          <WorldMap clusters={clusters ?? []} me={me} zone={zone} onCommand={handleCommand} />
 
           {/* no-base overlay */}
           {!me.hasBase && (
@@ -214,7 +210,8 @@ export default function Game() {
                   Buy base — {WORLD.BASE_PRICE_SOL} SOL
                 </Button>
                 <p className="mt-3 font-mono text-[10px] leading-4 text-muted-foreground">
-                  MVP DEMO · genesis grant already on your ledger
+                  SIMULATED PURCHASE — no wallet, no transaction, no real funds. Genesis grant already on
+                  your ledger. Burn rewards pay TOX only.
                 </p>
               </div>
             </div>
@@ -236,10 +233,12 @@ export default function Game() {
       <footer className="border-t border-border px-4 py-3">
         <p className="mx-auto flex max-w-7xl items-center justify-between font-mono text-[10px] text-muted-foreground">
           <span>
-            SIM · 1 tick = 1 game minute · robot speed 6 m/s · rewards at ${WORLD.REWARD_USD_PER_TON}/ton
+            SIM · 1 tick = 1 game minute · robot speed 6 m/s · rewards {TOX_PER_TON} TOX/t, Burn Zone ×
+            {BURN_ZONE_MULTIPLIER} ({Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} TOX/t)
           </span>
           <span className="hidden items-center gap-1 sm:flex">
-            <Skull className="size-3 text-red-500" />
+            <Flame className="size-3 text-yellow-400" />
+            {fmtTox(me.toxBalance)} TOX · <Skull className="size-3 text-red-500" />
             {user?.name ?? "Scavenger"}
           </span>
         </p>
@@ -247,4 +246,3 @@ export default function Game() {
     </div>
   );
 }
-

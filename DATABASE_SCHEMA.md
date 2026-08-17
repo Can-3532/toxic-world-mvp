@@ -1,6 +1,13 @@
-# TOXIC WORLD — DATABASE SCHEMA v0.1
+# TOXIC WORLD — DATABASE SCHEMA v0.1 (economy v0.4)
 
 Source of truth: `src/convex/schema.ts` (Convex, `schemaValidation: false`).
+
+> **v0.4 changes:** two new tables — `burnZones` (server-side random ×1.2 zone)
+> and `rewardLedger` (exactly-once TOX reward ledger, the new source of truth
+> for burn rewards). `players.toxFromNormal` / `players.toxFromZone` hold the
+> lifetime TOX counters. `players.totalEarnedSol` is DEPRECATED (never written
+> after v0.4). `players.processing` now carries `sessionId` + `sliceIndex`
+> (idempotency key components).
 
 Notes:
 - Convex adds `_id` (Id<Table>) and `_creationTime` to every doc automatically.
@@ -9,8 +16,9 @@ Notes:
   `base`, `robot`, `processingJob`, `transaction`, `upgrade`, or
   `rewardOutbox` tables (deviation from BACKEND TECHNICAL SPECIFICATION v0.1,
   which planned separate domain models).
-- Reward accounting is a **mock off-chain ledger** (`solBalance`,
-  `totalEarnedSol`, `toxBalance`); no on-chain data is stored anywhere.
+- Reward accounting: **TOX rewards are real in-database ledger entries**
+  (`rewardLedger`); SOL is a **mock off-chain ledger** (`solBalance`) used only
+  for the base purchase. No on-chain data is stored anywhere.
 
 ---
 
@@ -72,9 +80,11 @@ Index: `by_world` (`worldId`).
 | `genesisGrant` | boolean | demo credit flag |
 | `totalCollectedKg` | number | lifetime |
 | `totalBurnedKg` | number | lifetime |
-| `totalEarnedSol` | number | lifetime mock rewards |
+| `totalEarnedSol` | number? | **DEPRECATED (v0.3)** — never written after v0.4 |
+| `toxFromNormal` | number? | lifetime TOX from normal burns |
+| `toxFromZone` | number? | lifetime TOX from Burn Zone burns |
 | `storageKg` | number | waste held at base |
-| `processing` | object | `{ queuedKg, since }` — reserved for burner |
+| `processing` | object | `{ queuedKg, since, sessionId?, sliceIndex? }` — burner queue + idempotency state |
 | `levels` | object | `{ cargo, recharge, battery, storage }` each 1..5 |
 | `robot` | object | see below |
 
@@ -95,6 +105,34 @@ Indexes: `by_user` (`userId`), `by_world` (`worldId`).
 
 Index: `by_world` (`worldId`). Capped at 60 docs per world (`addEvent`).
 
+### `burnZones` — v0.4 server-side random Burn Zone
+| Field | Type | Notes |
+|---|---|---|
+| `worldId` | number | |
+| `status` | "active" \| "inactive" | client is read-only here |
+| `x`, `y` | number | zone location on the map |
+| `spawnedAt` | number | epoch ms |
+| `expiresAt` | number | epoch ms (active window 15–30 s) |
+| `nextSpawnAt` | number | epoch ms (cooldown 45–90 s) |
+| `multiplier` | number | 1.2 while active |
+
+Index: `by_world` (`worldId`). Lifecycle driven by `world:tick` (`stepBurnZone`).
+
+### `rewardLedger` — v0.4 TOX reward ledger (source of truth)
+| Field | Type | Notes |
+|---|---|---|
+| `playerId` | Id<"players"> | indexed (`by_player`) |
+| `worldId` | number | |
+| `key` | string | `${sessionId}:${sliceIndex}` — exactly-once |
+| `kind` | "normal" \| "burn_zone" | multiplier applied server-side |
+| `kg` | number | kg burned in this slice |
+| `tox` | number | TOX credited |
+| `at` | number | epoch ms |
+
+Index: `by_player` (`playerId`). Capped at 500 rows per player (audit tail).
+A slice whose `key` already exists is burned with **zero credit** — the same
+waste unit can never reward twice (normal + Burn Zone included).
+
 ---
 
 ## Relationships
@@ -111,6 +149,6 @@ Index: `by_world` (`worldId`). Capped at 60 docs per world (`addEvent`).
 |---|---|
 | `processingJob` | NOT PRESENT (embedded in `players.processing`) |
 | `transaction` | NOT PRESENT |
-| `rewardOutbox` | NOT PRESENT — **critical for real SOL settlement** |
+| `rewardOutbox` | NOT PRESENT — relevant only when a real SOL payout rail is added (TOX burn rewards are already ledgered) |
 | `upgrade` | NOT PRESENT (embedded in `players.levels`) |
 | `protection` (Base Lock / AFK / Shield / Emergency Launch) | NOT PRESENT |

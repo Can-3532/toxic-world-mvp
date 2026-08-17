@@ -1,12 +1,34 @@
-# TOXIC WORLD — ENGINEERING HANDOFF v0.1
+# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy updated to DESIGN FREEZE v0.4)
 
 Verified against the repository on disk (Freebuff Web / Vly sandbox).
 Everything below is grounded in actual files; anything not in the repo is
 explicitly marked NOT PRESENT / NOT VERIFIED. Mock vs real is always labeled.
 
-Verification evidence (run this turn):
-- `bun convex dev --once` → exit 0 (`Convex functions ready!` 09:04:35, dev deployment)
-- `bun tsc -b --noEmit` → exit 0 (part of the same combined run)
+Verification evidence (latest run):
+- `bunx convex dev --once` → exit 0 (`Convex functions ready!`, dev deployment)
+- `bunx tsc -b --noEmit` → exit 0
+- `bun test tests/economy.test.ts` → **26 pass / 0 fail** (45 assertions)
+- Live engine check: `bunx convex run world:worldState` — cron fires every 2 s
+  (pollution +0.8333 kg/tick, +25 clusters/tick), Burn Zone observed
+  `active ×1.2` at random (x, y) with the event feed recording it
+
+---
+
+## v0.4 ECONOMY CHANGE (supersedes the v0.3 burn-reward sections below)
+
+| Decision | Old (v0.3) | New (v0.4) | Code |
+|---|---|---|---|
+| Burn reward | SOL + TOX ($10/ton + 1 TOX/kg) | **TOX only** | `src/convex/economy.ts`, `world.ts` §6 |
+| Normal burn rate | $10/ton reference | **500 TOX / ton** (`kg/1000 × 500`) | `TOX_PER_TON` |
+| Burn Zone | — (new) | random shared zone, **×1.2 = 600 TOX / ton**, active 15–30 s, cooldown 45–90 s | `burnZones` table, `stepBurnZone` |
+| Reward ledger | direct field credit, no idempotency | **`rewardLedger` table, key = `sessionId:sliceIndex`, exactly-once** | `rewardLedger`, `economy.rewardKey` |
+| SOL balance | burn incremented `solBalance` | burn never touches SOL; SOL only for the **mock** base purchase | `world.ts` §6 (no SOL writes) |
+| KPI | financial ROI (~24 h SOL payback) | **Progression ROI** (TOX/time; Cargo L2 ≈ 7.8 h at starter rate) | `CARGO_CUMULATIVE_TOX`, `hoursToReach` |
+| Deprecated | — | `totalEarnedSol`, `WORLD.REWARD_USD_PER_TON`, leaderboard `earnedSol` kept but marked DEPRECATED | schema, gameParams, game.ts |
+
+Everything else from Design Freeze v0.3 (spatial robot, Global Waste Pool,
+Model C, Batch/Reservation, world capacity/pollution/collapse, upgrade costs)
+is **unchanged** in v0.4 — see §13 for the v0.3 compliance matrix.
 
 ---
 
@@ -61,11 +83,12 @@ Verification evidence (run this turn):
 ### Backend (Convex)
 | PATH | PURPOSE | ROLE | STATUS | DEPENDS ON | USED BY |
 |---|---|---|---|---|---|
-| `src/convex/schema.ts` | Tables: users, worlds, wasteClusters, players, worldEvents | Schema | ACTIVE | convex/server | codegen |
-| `src/convex/gameParams.ts` | Economy constants (freeze values) shared FE/BE | Config | ACTIVE | — | world.ts, game.ts, frontend |
-| `src/convex/world.ts` | World engine: `tick` (cron), `seedWorld`, `stepRobot`, queries | Engine | ACTIVE | gameParams, users | cron.ts, frontend |
+| `src/convex/schema.ts` | Tables: users, worlds, wasteClusters, players, worldEvents, burnZones, rewardLedger | Schema | ACTIVE | convex/server | codegen |
+| `src/convex/gameParams.ts` | Economy constants (Design Freeze v0.4) shared FE/BE | Config | ACTIVE | — | world.ts, game.ts, economy.ts, frontend |
+| `src/convex/economy.ts` | Pure v0.4 reward formulas + idempotency keys (unit-tested) | Economy | ACTIVE | gameParams | world.ts, tests |
+| `src/convex/world.ts` | World engine: `tick` (cron), `seedWorld`, `stepRobot`, `stepBurnZone`, queries | Engine | ACTIVE | gameParams, economy, users | crons.ts, frontend |
 | `src/convex/game.ts` | Player mutations + queries | Domain API | ACTIVE | gameParams, users | frontend |
-| `src/convex/cron.ts` | `toxic-world-tick` every 2 s | Scheduler | ACTIVE | world.tick | deployment |
+| `src/convex/crons.ts` | `toxic-world-tick` every 2 s (**must be named `crons.ts`** — Convex only auto-registers that filename; this was a bug in v0.1, fixed) | Scheduler | ACTIVE | world.tick | deployment |
 | `src/convex/users.ts` | `currentUser` helper | Auth helper | ACTIVE | auth | game.ts |
 | `src/convex/auth.ts` | Convex Auth providers | Auth | ACTIVE (read-only) | @convex-dev/auth | http.ts |
 | `src/convex/auth.config.ts` | Auth config (OIDC/JWT) | Auth | ACTIVE (read-only) | — | deployment |
@@ -78,7 +101,11 @@ Verification evidence (run this turn):
 `vite.config.ts`, `index.html`, `components.json`, `.gitignore`, `integrations.md`.
 
 ### Tests
-**NONE.** No `*.test.*` / `*.spec.*` files exist (glob-verified).
+`tests/economy.test.ts` — Bun test runner, 26 tests / 45 assertions, ALL PASS
+(`bun test tests/economy.test.ts`). Covers: 500 TOX/ton, 600 TOX/ton zone,
+fractional rewards, exactly-once key scheme (normal vs zone share one key),
+no-SOL-write path, 1:1 pollution reduction for both kinds, starter 24 h ≈ 460
+TOX/day, and cargo progression times (7.8 / 19.6 / 37.3 / 63.9 h).
 
 ### Solana
 **NONE.** No packages, no files. (Design-doc Solana Sprint 1 artifacts are not in this repo.)
@@ -109,8 +136,9 @@ Legend: STATUS = implemented in code; REAL/MOCK = simulation vs external; TESTED
 | Collapse | `world.ts` | `tick` (§6: ≥100%) | DONE | REAL | as above |
 | World reset | `world.ts` | `tick` (§6: 22.5%, worldId+1) | DONE | REAL | as above |
 | Player persistence | `schema.ts` / `game.ts` | `players` table | DONE | REAL (Convex DB) | as above |
-| Reward ledger (SOL) | `world.ts` / `game.ts` | `solBalance`, `totalEarnedSol` | DONE | **MOCK (off-chain)** | as above |
-| TOX ledger | `world.ts` / `game.ts` | `toxBalance` | DONE | **MOCK (off-chain)** | as above |
+| TOX reward ledger | `world.ts` / `economy.ts` / schema | `rewardLedger` table + `toxFromNormal`/`toxFromZone` counters — exactly-once via `sessionId:sliceIndex` | DONE | REAL (in-database ledger; no chain) | Unit tests + live ticks |
+| Burn Zone (v0.4) | `world.ts` `stepBurnZone` / `burnZones` table | random location + spawn/expire schedule, server-side ×1.2 | DONE | REAL (server-driven) | **LIVE VERIFIED** (active zone observed at (394, 137)) |
+| SOL ledger | `game.ts` | `solBalance` — base purchase only, burn never writes it | DONE | **MOCK (off-chain)** | — |
 | Base purchase | `game.ts` | `buyBase` (0.1 SOL, deducts mock balance) | DONE | **MOCK (no tx)** | as above |
 
 Runtime behavior of the engine is **NOT VERIFIED** beyond compile/deploy: there is
@@ -158,7 +186,7 @@ no test harness executing ticks and asserting invariants in this repo.
 | TOX token | — | — | — | No | No | No SPL token program |
 | Treasury | — | — | — | No | No | — |
 | Reward outbox | — | — | — | No | No | Rewards credited directly in `tick` |
-| SOL reward settlement | `world.ts` | `tick` §5 | OFF-CHAIN | No | No | Adds to `solBalance` |
+| SOL reward settlement | — | — | — | No | No | **REMOVED in v0.4** — burn never pays SOL; rewards are TOX ledger entries only |
 | Withdrawal | — | — | — | No | No | — |
 | Retry | — | — | — | No | No | — |
 | Idempotency | — | — | — | No | No | No idempotency keys |
@@ -192,10 +220,12 @@ See `DATABASE_SCHEMA.md` (deliverable) and `src/convex/schema.ts`.
 
 ## 7. WORLD ENGINE — formulas exactly as coded (`src/convex/world.ts`, `gameParams.ts`)
 
-Constants: `CAPACITY_KG = 10,000,000`, `TICK_GAME_H = 1/60`,
-`BASE_GEN_KG_H = 50`, `DEMAND_REF_KG_H = 42`, `SOL_PER_KG = (10/1000)/150`,
-`TOX_PER_KG = 1`, `PROCESSING_KG_PER_S = 2`, `CLUSTER_MIN/MAX = 150/900`,
-`ACTIVE_CLUSTER_TARGET = 500`, `CRITICAL_FRAC = 0.9`.
+Constants (v0.4): `CAPACITY_KG = 10,000,000`, `TICK_GAME_H = 1/60`,
+`BASE_GEN_KG_H = 50`, `DEMAND_REF_KG_H = 42`, `TOX_PER_TON = 500`,
+`BURN_ZONE_MULTIPLIER = 1.2`, `PROCESSING_KG_PER_S = 2`,
+`CLUSTER_MIN/MAX = 150/900`, `ACTIVE_CLUSTER_TARGET = 500`,
+`CRITICAL_FRAC = 0.9`. (`WORLD.TOX_PER_KG = 1` and `WORLD.REWARD_USD_PER_TON`
+remain only as DEPRECATED legacy aliases.)
 
 - **Generation:** `genKgH = activeBases × 50`; `pollutionKg = min(cap, pollutionKg + genKgH × 1/60)` per tick.
 - **Demand (for Model C):** `demandKgH = Σ (robots in to_cluster|collecting|to_base) × 42` — a reference constant, **not** measured throughput (deviation, see §13).
@@ -211,8 +241,13 @@ Constants: `CAPACITY_KG = 10,000,000`, `TICK_GAME_H = 1/60`,
   guarantee for low-level players" is **not** enforced (deviation).
 - **Cluster spawn:** while `active < 500 && collectable ≥ 150 && spawned < 25`:
   `size = min(150 + rand×750, collectable)`; `collectable -= size`.
-- **Burn:** `burn = min(queuedKg, 2 × 2s)`; `sol += burn × SOL_PER_KG`;
-  `tox += burn × 1`; `totalBurnedKg/burnedKg += burn`.
+- **Burn (v0.4, exactly-once):** `burn = min(queuedKg, 2 × 2s)` per slice;
+  `slice = { key: sessionId:sliceIndex, kg: burn, tox: kg/1000 × 500 (×1.2 if
+  burn zone active), kind }`; if `rewardLedger` already has `key` → burn with
+  ZERO credit (duplicate-tick safe); else credit `toxBalance` +
+  `toxFromNormal`/`toxFromZone` + insert ledger row + reduce `pollutionKg` by
+  `burn` (identical for both kinds). `totalBurnedKg/burnedKg += burn` in both
+  cases. `solBalance` is NEVER written by burn.
 - **Collapse:** `pollutionKg ≥ 10,000,000` → worldId+1, pollution = 22.5% of cap,
   collectable = 10% of that, status safe, all players migrated, clusters reseeded.
 - Freeze checks: capacity 10,000 t ✓; World 0 start 50% ✓; World 1+ 22.5% ✓;
@@ -244,9 +279,10 @@ Constants: `CAPACITY_KG = 10,000,000`, `TICK_GAME_H = 1/60`,
 | VALUE | VALUE | SOURCE FILE | SOURCE FUNCTION | FREEZE / PLACEHOLDER / MOCK |
 |---|---|---|---|---|
 | Base price | 0.1 SOL | gameParams | `WORLD.BASE_PRICE_SOL` | FREEZE |
-| SOL reward / ton | $10/ton → 0.00006667 SOL/kg (@ $150/SOL) | gameParams | `SOL_PER_KG` | FREEZE (SOL price display constant = placeholder) |
-| Settlement fee | 0 (none defined) | — | — | NOT DEFINED in freeze |
-| TOX per kg | 1 | gameParams | `WORLD.TOX_PER_KG` | PLACEHOLDER (not in freeze) |
+| Normal burn reward | **500 TOX / ton** (`kg/1000 × 500`) | economy.ts / gameParams | `TOX_PER_TON` | **FREEZE v0.4** |
+| Burn Zone reward | **600 TOX / ton** (`×1.2`) | economy.ts / world.ts | `BURN_ZONE_MULTIPLIER` | **FREEZE v0.4** |
+| SOL burn reward | **REMOVED (v0.4)** — burn never pays SOL | — | — | REMOVED; `totalEarnedSol`/`REWARD_USD_PER_TON` kept DEPRECATED |
+| Settlement fee | n/a — no SOL settlement path remains | — | — | — |
 | Cargo costs | 150/225/340/510 | gameParams | `UPGRADES.cargo.costs` | FREEZE |
 | Recharge costs | 20/30/45/65 | gameParams | `UPGRADES.recharge.costs` | FREEZE |
 | Storage costs | 200/320/500/760 | gameParams | `UPGRADES.storage.costs` | PLACEHOLDER (freeze left open → P1) |
@@ -262,16 +298,15 @@ Constants: `CAPACITY_KG = 10,000,000`, `TICK_GAME_H = 1/60`,
 
 | TEST | FILE | COMMAND | VALIDATES | PASS/FAIL | LAST VERIFIED |
 |---|---|---|---|---|---|
-| (none exist in repo) | — | — | — | — | — |
+| v0.4 reward formulas (26 tests) | `tests/economy.test.ts` | `bun test tests/economy.test.ts` | 500/600 TOX per ton, fractions, idempotency keys, no-SOL path, pollution 1:1, starter 460 TOX/day, cargo progression times | **26 PASS / 0 FAIL** (45 assertions) | this turn |
+| Convex codegen + deploy | — | `bunx convex dev --once` | functions compile & deploy to dev | **PASS** (exit 0) | this turn |
+| Whole-project typecheck | — | `bunx tsc -b --noEmit` | TS across frontend + backend | **PASS** (exit 0) | this turn |
+| Live engine smoke | — | `bunx convex run world:worldState` ×2 (12 s apart) | cron fires every 2 s: pollution +5.83 kg, clusters +175 | **PASS** (observed deltas) | this turn |
+| Burn Zone lifecycle (live) | — | `bunx convex run world:worldState` + `world:events` | zone spawned ACTIVE ×1.2 at (394, 137), event recorded | **PASS** (observed) | this turn |
 
-Verification actually performed this handoff:
-- `bun convex dev --once` → **PASS** (exit 0, 09:04:35) — codegen + deploy to dev.
-- `bun tsc -b --noEmit` → **PASS** (exit 0) — whole-project typecheck.
-
-**NOT TESTED (critical, no harness):** world-tick runtime behavior, cron firing,
-mass-conservation invariant, economic balance, multi-player concurrency, load
-(10k players), reservation race, double-tick prevention at runtime, upgrade
-economics.
+**NOT TESTED (no harness):** full player burn → ledger path end-to-end (needs an
+authenticated player with storage; CLI `convex run` cannot sign in), multiplayer
+concurrency, load (10k players), reservation races.
 
 ---
 
@@ -346,8 +381,8 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | Frontend | DONE (landing + game) |
 | Auth | DONE (email OTP + anonymous) |
 | Solana | NOT IMPLEMENTED — MOCK ONLY |
-| Economy | PARTIAL (simulated; storage/battery placeholders; no fees) |
-| Reward Settlement | MOCK (direct ledger credit; no outbox, no idempotency) |
+| Economy | DONE for v0.4 (TOX-only rewards, Burn Zones, ledgered; storage/battery costs remain P1 placeholders) |
+| Reward Settlement | PARTIAL (TOX: real in-database ledger, exactly-once; SOL: none by design — no chain, no outbox) |
 | Multiplayer | PARTIAL (shared world state; NOT load-tested, not verified with concurrent clients) |
 | Production Deployment | NOT CONFIGURED (dev deployment only) |
 
@@ -357,16 +392,15 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 
 | # | TASK | ROLE | DEPENDENCY | OUTPUT | ACCEPTANCE CRITERIA |
 |---|---|---|---|---|---|
-| 1 | Reward Outbox + idempotency keys | Backend | — | `rewardOutbox` table; `processReward` with unique key | Duplicate tick credit impossible; every burn exactly one outbox entry |
-| 2 | Engine test harness (invariants) | Backend | — | test script driving `tick` N times | Mass conservation within epsilon; collapse/reset verified; PASS in CI |
-| 3 | Real Solana rail (wallet + base purchase + payouts) | Backend/Frontend | #1 | `@solana/web3.js` or Coinbase Commerce; wallet connect; treasury payouts | 0.1 SOL purchase verified on devnet; reward paid from treasury once |
-| 4 | Split embedded models into tables | Backend | — | `robots`, `processingJobs`, `transactions` tables | Matches Backend Spec v0.1; migration script |
-| 5 | Storage/Battery P1 balance | Economy | #2 | parameter update in `gameParams.ts` | Playtest data; storage pressure + ROI measured |
-| 6 | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | schema + tick logic + UI | Each system has test + UI state |
-| 7 | Concurrency hardening of `tick` | Backend | #1 | atomic guard or serialized tick | Double-tick impossible |
-| 8 | Performance: spatial bucketing for nearest-cluster | Backend | — | indexed/spatial lookup | 10k-player tick < 2 s |
-| 9 | Multiplayer QA (10/100/1k/10k) | QA | #8 | load script + report | Throughput/pollution curves match sim |
-| 10 | Production deployment | DevOps | all | `bunx convex deploy` + prod envs | Landing + game on prod URL; cron firing |
+| 1 | End-to-end burn test with a real signed-in player (browser or seeded mutation) | Backend/QA | — | authenticated player collects → processes → burns; ledger rows inspected | `rewardLedger` gains normal + burn-zone entries; `toxBalance` grows; pollution drops; `solBalance` unchanged |
+| 2 | Engine invariant harness (mass conservation) | Backend | — | headless script driving `tick` N ticks, asserting `spawn = collect + burn + residual` | Invariant within epsilon over 1000 ticks; collapse/reset verified |
+| 3 | Storage/Battery P1 rebalance | Economy | #2 | `gameParams.ts` update | Playtest data; storage pressure + progression ROI measured |
+| 4 | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | schema + tick logic + UI | Each system has test + UI state |
+| 5 | Concurrency hardening of `tick` (atomic guard) | Backend | — | atomic CAS or serialized tick | Double-advance impossible under concurrent calls |
+| 6 | Real Solana entry rail (0.1 SOL base purchase) | Backend/Frontend | — | Coinbase Commerce or wallet SDK; server-side verification | Purchase verified on devnet; base granted only on confirmation; burn still pays TOX only |
+| 7 | Performance: spatial bucketing for nearest-cluster | Backend | — | indexed/spatial lookup | 10k-player tick < 2 s |
+| 8 | Multiplayer QA (10/100/1k/10k) | QA | #7 | load script + report | Throughput/pollution curves match sim |
+| 9 | Production deployment | DevOps | — | `bunx convex deploy` + prod envs | Landing + game on prod URL; cron firing |
 
 ---
 
@@ -389,33 +423,39 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 
 | Area | Status | Real/Mock | Evidence | Next Owner | Next Task |
 |---|---|---|---|---|---|
-| World engine | DONE | REAL (simulated) | `src/convex/world.ts` | Backend | #2 test harness |
-| Economy | PARTIAL | REAL (simulated) | `gameParams.ts` | Economy | #5 P1 balance |
-| Backend API | PARTIAL | REAL | `game.ts`, `world.ts` | Backend | #4 model split |
+| World engine | DONE | REAL (server sim, cron-driven) | `src/convex/world.ts` + `crons.ts` | Backend | #2 invariant harness |
+| Economy (v0.4) | DONE | REAL (in-database ledger) | `economy.ts`, `rewardLedger`, `burnZones` | Economy | #3 P1 balance |
+| Backend API | PARTIAL | REAL | `game.ts`, `world.ts` | Backend | — |
 | Persistence | DONE | REAL | `schema.ts` | — | — |
-| Frontend | DONE | REAL | `pages/`, `components/game/` | Frontend | #3 wallet UI |
+| Frontend | DONE | REAL | `pages/`, `components/game/` | Frontend | #1 browser test |
 | Auth | DONE | REAL | `convex/auth*.ts` | — | — |
-| Reward settlement | MOCK | MOCK | `world.ts` §5 ledger | Backend | #1 outbox |
-| Solana | NOT IMPLEMENTED | MOCK | none (no packages) | Blockchain | #3 real rail |
-| Multiplayer | PARTIAL | REAL | shared world state | QA | #9 load test |
-| Production deploy | NOT CONFIGURED | — | dev deployment only | DevOps | #10 deploy |
+| Reward settlement | PARTIAL (TOX ledgered exactly-once; SOL none by design) | REAL (ledger) | `rewardLedger` | Backend | #1 e2e burn test |
+| Solana | NOT IMPLEMENTED | MOCK | none (no packages) | Blockchain | #6 entry rail |
+| Multiplayer | PARTIAL | REAL | shared world state | QA | #8 load test |
+| Production deploy | NOT CONFIGURED | — | dev deployment only | DevOps | #9 deploy |
 
 ---
 
 ## CURRENT PROJECT STATE
-A playable single-world MVP on Convex + React: server-authoritative spatial
-robots, global waste pool with Model C replenishment and reservation allocation,
-burn-for-SOL/TOX loop, upgrades, collapse/reset, auth, and a themed landing +
-game UI. Everything economic is simulated in-database; no blockchain code exists.
+A playable single-world MVP on Convex + React with a **v0.4 TOX-only reward
+economy**: server-authoritative spatial robots, global waste pool with Model C
+replenishment and reservation allocation, burn → TOX (500/ton, ×1.2 in random
+server-driven Burn Zones) credited exactly-once through a `rewardLedger` table,
+upgrades, collapse/reset, auth, and a themed landing + game UI. The world tick
+cron now actually fires (renamed `crons.ts`); SOL exists only as a mock entry
+balance for the base purchase. No blockchain code exists.
 
 ## CRITICAL BLOCKERS
-1. No reward outbox / idempotency — blocks any real SOL settlement.
-2. No engine test harness — runtime correctness (invariants, collapse) unverified.
-3. No Solana integration of any kind (wallet, transactions, treasury).
+1. No end-to-end burn test with an authenticated player (CLI can't sign in) —
+   the collect→burn→ledger path is unit- and live-state verified, not e2e.
+2. No engine invariant harness (mass conservation over many ticks).
+3. No Solana integration of any kind (wallet, transactions, treasury) — SOL is
+   mock by design under v0.4.
 4. `tick` concurrency guard is not atomic — theoretical double-advance exists.
 5. No production deployment configured (dev-only).
 
 ## NEXT IMMEDIATE TASK
-**Build the reward outbox with idempotency keys** (`rewardOutbox` table +
-credit-once logic in `world.ts` §5), so burn rewards become exactly-once before
-any real-money rail is attached.
+**Run the first authenticated end-to-end burn:** sign in via the app, deploy
+the base, let the robot collect, process, and burn — then verify `rewardLedger`
+rows (normal + burn-zone kinds), `toxBalance` growth, `solBalance` unchanged,
+and the pollution drop in the dev dashboard.

@@ -2,16 +2,24 @@ import { v } from "convex/values";
 import { mutation, query, MutationCtx } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import {
+  BURN_ZONE,
+  BURN_ZONE_MULTIPLIER,
   REPLENISHMENT,
   ROBOT,
   UPGRADES,
   WORLD,
-  SOL_PER_KG,
   batteryForTrip,
 } from "./gameParams";
+import {
+  advanceBurn,
+  applyBurnToPollution,
+  computeBurnSlice,
+  type BurnSlice,
+} from "./economy";
 import { batteryCap, cargoCap, storageCap } from "./game";
 
 const TICK_GAME_H = WORLD.GAME_MINUTES_PER_TICK / 60; // game hours per tick
+const LEDGER_KEEP_PER_PLAYER = 500;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -24,6 +32,8 @@ function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
 function formatKg(kg: number): string {
   return kg >= 1000 ? `${(kg / 1000).toFixed(2)} t` : `${Math.round(kg)} kg`;
 }
+
+const rand = (min: number, max: number) => min + Math.random() * (max - min);
 
 async function addEvent(
   ctx: MutationCtx,
@@ -282,6 +292,59 @@ async function stepRobot(
 }
 
 // ---------------------------------------------------------------------------
+// burn zone lifecycle
+// ---------------------------------------------------------------------------
+
+async function stepBurnZone(
+  ctx: MutationCtx,
+  worldId: number,
+  now: number,
+): Promise<Doc<"burnZones"> | null> {
+  let zone = await ctx.db
+    .query("burnZones")
+    .withIndex("by_world", (q) => q.eq("worldId", worldId))
+    .first();
+  if (!zone) {
+    const id = await ctx.db.insert("burnZones", {
+      worldId,
+      status: "inactive",
+      x: 0,
+      y: 0,
+      spawnedAt: 0,
+      expiresAt: 0,
+      nextSpawnAt: now + rand(BURN_ZONE.MIN_COOLDOWN_S, BURN_ZONE.MAX_COOLDOWN_S) * 1000,
+      multiplier: BURN_ZONE_MULTIPLIER,
+    });
+    return (await ctx.db.get(id)) as Doc<"burnZones">;
+  }
+
+  if (zone.status === "inactive" && now >= zone.nextSpawnAt) {
+    const x = rand(120, WORLD.MAP_SIZE - 120);
+    const y = rand(120, WORLD.MAP_SIZE - 120);
+    const expiresAt = now + rand(BURN_ZONE.MIN_ACTIVE_S, BURN_ZONE.MAX_ACTIVE_S) * 1000;
+    await ctx.db.patch(zone._id, { status: "active", x, y, spawnedAt: now, expiresAt });
+    await addEvent(
+      ctx,
+      worldId,
+      "burn_zone",
+      `🔥 BURN ZONE ACTIVE at (${Math.round(x)}, ${Math.round(y)}) — ×${BURN_ZONE_MULTIPLIER} TOX`,
+    );
+    return (await ctx.db.get(zone._id)) as Doc<"burnZones">;
+  }
+
+  if (zone.status === "active" && now >= zone.expiresAt) {
+    await ctx.db.patch(zone._id, {
+      status: "inactive",
+      nextSpawnAt: now + rand(BURN_ZONE.MIN_COOLDOWN_S, BURN_ZONE.MAX_COOLDOWN_S) * 1000,
+    });
+    await addEvent(ctx, worldId, "burn_zone", "Burn Zone expired — rewards back to normal");
+    return (await ctx.db.get(zone._id)) as Doc<"burnZones">;
+  }
+
+  return zone;
+}
+
+// ---------------------------------------------------------------------------
 // the world tick (driven by cron)
 // ---------------------------------------------------------------------------
 
@@ -341,7 +404,7 @@ export const tick = mutation({
       }
     }
 
-    // 3) dynamic replenishment — Model C
+    // 3) dynamic replenishment — Model C (unchanged from v0.3)
     const ratio = genKgH > 0 ? demandKgH / genKgH : 0;
     const replFracH = Math.min(
       REPLENISHMENT.MAX_FRAC,
@@ -360,31 +423,85 @@ export const tick = mutation({
       clusterMap.size,
     );
 
-    // 5) processing / burning → rewards
+    // 5) Burn Zone lifecycle (v0.4)
+    const zone = await stepBurnZone(ctx, worldId, now);
+    const zoneActive = zone?.status === "active";
+
+    // 6) processing / burning → TOX-only rewards (v0.4)
     let burnedKg = world.burnedKg;
     for (const p of players) {
       if (p.processing.queuedKg <= 0) continue;
-      const burn = Math.min(
-        p.processing.queuedKg,
-        WORLD.PROCESSING_KG_PER_S * dtReal,
-      );
-      const queuedKg = p.processing.queuedKg - burn;
-      const sol = burn * SOL_PER_KG;
-      const tox = burn * WORLD.TOX_PER_KG;
-      await ctx.db.patch(p._id, {
-        processing: { queuedKg, since: p.processing.since },
-        solBalance: p.solBalance + sol,
-        toxBalance: p.toxBalance + tox,
-        totalBurnedKg: p.totalBurnedKg + burn,
-        totalEarnedSol: p.totalEarnedSol + sol,
-      });
-      burnedKg += burn;
-      if (queuedKg === 0) {
-        await addEvent(ctx, worldId, "burn", `Burn complete — ${sol.toFixed(6)} SOL settled`);
+
+      // ensure a burn session exists (also migrates pre-v0.4 docs)
+      const sessionId = p.processing.sessionId ?? `${p._id}:${p.processing.since || now}`;
+      const sliceIndex = p.processing.sliceIndex ?? 0;
+
+      const burnKg = Math.min(p.processing.queuedKg, WORLD.PROCESSING_KG_PER_S * dtReal);
+      const state: BurnSlice = { sessionId, queuedKg: p.processing.queuedKg, sliceIndex };
+      const slice = computeBurnSlice(state, burnKg, zoneActive);
+
+      // idempotency: never credit the same slice twice
+      const existing = await ctx.db
+        .query("rewardLedger")
+        .withIndex("by_player", (q) => q.eq("playerId", p._id))
+        .filter((q) => q.eq(q.field("key"), slice.key))
+        .first();
+      const alreadyRewarded = !!existing;
+
+      const next = advanceBurn(state, burnKg, alreadyRewarded);
+      const patch: Record<string, unknown> = {
+        processing: {
+          queuedKg: next.queuedKg,
+          since: p.processing.since,
+          sessionId,
+          sliceIndex: next.sliceIndex,
+        },
+      };
+
+      if (!alreadyRewarded) {
+        await ctx.db.insert("rewardLedger", {
+          playerId: p._id,
+          worldId,
+          key: slice.key,
+          kind: slice.kind,
+          kg: slice.kg,
+          tox: slice.tox,
+          at: now,
+        });
+        patch.toxBalance = p.toxBalance + slice.tox;
+        patch.totalBurnedKg = p.totalBurnedKg + burnKg;
+        patch.toxFromNormal = (p.toxFromNormal ?? 0) + (slice.kind === "normal" ? slice.tox : 0);
+        patch.toxFromZone = (p.toxFromZone ?? 0) + (slice.kind === "burn_zone" ? slice.tox : 0);
+        // burning removes waste from the world 1:1 — same for normal and zone
+        pollutionKg = applyBurnToPollution(pollutionKg, burnKg);
+        burnedKg += burnKg;
+
+        if (next.queuedKg === 0) {
+          await addEvent(
+            ctx,
+            worldId,
+            "burn",
+            `Burn complete — +${slice.tox.toFixed(2)} TOX (${slice.kind === "burn_zone" ? "Burn Zone ×1.2" : "normal"})`,
+          );
+        }
+
+        // bound the ledger (audit tail)
+        const entries = await ctx.db
+          .query("rewardLedger")
+          .withIndex("by_player", (q) => q.eq("playerId", p._id))
+          .collect();
+        if (entries.length > LEDGER_KEEP_PER_PLAYER) {
+          const sorted = [...entries].sort((a, b) => a._creationTime - b._creationTime);
+          for (const old of sorted.slice(0, entries.length - LEDGER_KEEP_PER_PLAYER)) {
+            await ctx.db.delete(old._id);
+          }
+        }
       }
+
+      await ctx.db.patch(p._id, patch);
     }
 
-    // 6) world status / collapse
+    // 7) world status / collapse
     let status: Doc<"worlds">["status"] =
       pollutionKg >= world.capacityKg
         ? "collapsed"
@@ -455,7 +572,7 @@ export const worldState = query({
   handler: async (ctx) => {
     const world = await ctx.db.query("worlds").first();
     if (!world) return null;
-    const [clusters, players] = await Promise.all([
+    const [clusters, players, zone] = await Promise.all([
       ctx.db
         .query("wasteClusters")
         .withIndex("by_world", (q) => q.eq("worldId", world.worldId))
@@ -464,9 +581,14 @@ export const worldState = query({
         .query("players")
         .withIndex("by_world", (q) => q.eq("worldId", world.worldId))
         .collect(),
+      ctx.db
+        .query("burnZones")
+        .withIndex("by_world", (q) => q.eq("worldId", world.worldId))
+        .first(),
     ]);
     return {
       world,
+      zone,
       clusterCount: clusters.length,
       activePlayers: players.filter((p) => p.hasBase).length,
       totalPlayers: players.length,

@@ -1,7 +1,13 @@
-# TOXIC WORLD — API SPECIFICATION v0.1
+# TOXIC WORLD — API SPECIFICATION v0.1 (economy v0.4)
 
 **Backend:** Convex serverless functions (NOT the FastAPI + WebSocket design from
 BACKEND TECHNICAL SPECIFICATION v0.1 — see DEVIATION notes in the handoff report).
+
+> **v0.4 economy:** burn rewards are TOX-only. Normal burn = 500 TOX/ton; active
+> Burn Zone = 600 TOX/ton (×1.2). Client NEVER sends a reward amount — the
+> multiplier is decided server-side by the `burnZones` doc. Every burn slice is
+> credited exactly-once through the `rewardLedger` table (`key =
+> sessionId:sliceIndex`).
 
 Client references are auto-generated in `src/convex/_generated/api.ts`.
 All functions live under `src/convex/*.ts`. No REST endpoints exist except the
@@ -26,12 +32,15 @@ Convex Auth HTTP routes.
 - Args: `{}`
 - Auth: public
 - Returns: top-10 collectors by `totalBurnedKg`:
-  `[{ name, burnedKg, earnedSol, tox, worldId }]`
+  `[{ name, burnedKg, toxEarned, worldId, earnedSol }]` where `toxEarned =
+  toxFromNormal + toxFromZone` and `earnedSol` is DEPRECATED (v0.3, always 0)
 
 ### `api.world.worldState` — src/convex/world.ts
 - Args: `{}`
 - Auth: public (used by the landing page)
-- Returns: `{ world, clusterCount, activePlayers, totalPlayers } | null`
+- Returns: `{ world, zone, clusterCount, activePlayers, totalPlayers } | null`
+  where `zone` is the `burnZones` doc (status `active` | `inactive`, x/y,
+  spawnedAt/expiresAt, multiplier 1.2)
 
 ### `api.world.clusters` — src/convex/world.ts
 - Args: `{}`
@@ -80,7 +89,9 @@ Convex Auth HTTP routes.
 ### `api.game.queueProcessing` — src/convex/game.ts
 - Args: `{}`
 - Auth: required
-- Effect: moves `storageKg` into `processing.queuedKg` (reserved for the burner)
+- Effect: moves `storageKg` into `processing.queuedKg` and starts/appends a burn
+  session (`sessionId = playerId:now`, kept stable while the queue is non-empty
+  so reward keys stay unique per waste unit)
 - Errors: `"Storage is empty"`
 - Returns: `{ ok, queuedKg }`
 
@@ -102,11 +113,30 @@ Convex Auth HTTP routes.
 
 ---
 
-## 3. CRON JOBS — src/convex/cron.ts
+## 3. CRON JOBS — src/convex/crons.ts
 
 | Name | Schedule | Target |
 |------|----------|--------|
 | `toxic-world-tick` | every 2 s | `api.world.tick` |
+
+---
+
+## 3b. V0.4 REWARD ECONOMY (server-side)
+
+Pure formulas live in `src/convex/economy.ts` (imported by the world engine and
+by `tests/economy.test.ts` — no Convex runtime imports):
+
+```
+normalBurnTox(kg)   = kg / 1000 × 500            // 1 ton → 500 TOX
+burnZoneTox(kg)     = normalBurnTox(kg) × 1.2    // 1 ton → 600 TOX
+rewardKey(session, slice) = `${session}:${slice}` // idempotency key
+applyBurnToPollution(p, kg) = max(0, p - kg)      // identical for both kinds
+```
+
+In `world:tick` (step 6): each burn slice looks up its key in `rewardLedger`;
+if absent it credits TOX (`toxBalance`, `toxFromNormal`/`toxFromZone`) and
+inserts the ledger row; if present it burns the kg with NO credit (duplicate-tick
+safe). Client-supplied numbers never enter this path.
 
 ---
 

@@ -85,16 +85,24 @@ const schema = defineSchema(
       baseX: v.optional(v.number()),
       baseY: v.optional(v.number()),
       // mock economy ledger (real Solana settlement is a follow-up rail)
-      solBalance: v.number(),
-      toxBalance: v.number(),
+      // v0.4: SOL is used ONLY for the (mock) base purchase; burn pays TOX.
+      solBalance: v.number(), // MOCK — base purchase only
+      toxBalance: v.number(), // game token — earned by burning, spent on upgrades
       genesisGrant: v.boolean(),
       totalCollectedKg: v.number(),
       totalBurnedKg: v.number(),
-      totalEarnedSol: v.number(),
+      // DEPRECATED (v0.3) — burn no longer pays SOL. Kept for backward
+      // compat with existing docs; never written after v0.4.
+      totalEarnedSol: v.optional(v.number()),
+      // v0.4 TOX reward counters (server-side, derived from rewardLedger)
+      toxFromNormal: v.optional(v.number()),
+      toxFromZone: v.optional(v.number()),
       storageKg: v.number(),
       processing: v.object({
         queuedKg: v.number(), // reserved for the burner
         since: v.number(),
+        sessionId: v.optional(v.string()), // unique burn session (queueProcessing)
+        sliceIndex: v.optional(v.number()), // idempotency key component
       }),
       levels: v.object({
         cargo: v.number(), // 1..5
@@ -121,13 +129,39 @@ const schema = defineSchema(
       .index("by_user", ["userId"])
       .index("by_world", ["worldId"]),
 
-    // live world event feed (spawns, depletions, burns, collapse)
+    // live world event feed (spawns, depletions, burns, burn zones, collapse)
     worldEvents: defineTable({
       worldId: v.number(),
       type: v.string(),
       message: v.string(),
       at: v.number(),
     }).index("by_world", ["worldId"]),
+
+    // v0.4 — Burn Zone: temporary, randomly-located shared event with a
+    // server-side reward multiplier. Client only ever reads this state.
+    burnZones: defineTable({
+      worldId: v.number(),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+      x: v.number(),
+      y: v.number(),
+      spawnedAt: v.number(),
+      expiresAt: v.number(),
+      nextSpawnAt: v.number(),
+      multiplier: v.number(), // 1.2 while active
+    }).index("by_world", ["worldId"]),
+
+    // v0.4 — TOX reward ledger (source of truth for burn rewards).
+    // One entry per burn slice; `key` (sessionId:sliceIndex) makes rewards
+    // exactly-once: the same waste unit can never produce TOX twice.
+    rewardLedger: defineTable({
+      playerId: v.id("players"),
+      worldId: v.number(),
+      key: v.string(),
+      kind: v.union(v.literal("normal"), v.literal("burn_zone")),
+      kg: v.number(),
+      tox: v.number(),
+      at: v.number(),
+    }).index("by_player", ["playerId"]),
   },
   {
     schemaValidation: false,
