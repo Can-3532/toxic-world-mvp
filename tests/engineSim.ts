@@ -482,19 +482,27 @@ export function tickSim(w: SimWorld): void {
   w.pollutionKg = Math.min(w.capacityKg, w.pollutionKg + genKgH * TICK_GAME_H);
   w.generatedKg += genKgH * TICK_GAME_H;
 
-  // 2) robots (spatial state machine) — Batch/Reservation plan first,
-  // identical to world.ts (engine.ts batchAllocation on unclaimed clusters).
+  // 2) robots (spatial state machine) — Sprint 2.6 sharding + Batch/
+  // Reservation plan, identical to world.ts. Beyond ROBOTS_PER_TICK players,
+  // robots advance in round-robin shards (each robot every shardCount ticks).
   const clusterMap = new Map(w.clusters.map((c) => [c.id, c]));
+  const shardCount = Math.max(
+    1,
+    Math.ceil(w.players.length / WORLD.ROBOTS_PER_TICK),
+  );
+  const shardIndex = w.tickCount % shardCount;
   const batchAssignments = batchAllocation(
     w.players
+      .map((p, i) => ({ p, i }))
       .filter(
-        (p) =>
+        ({ p, i }) =>
+          i % shardCount === shardIndex &&
           p.hasBase &&
           p.auto &&
           p.state === "idle" &&
           p.cargoKg < cargoCapOf(p),
       )
-      .map((p) => ({
+      .map(({ p }) => ({
         id: p.id,
         x: p.x,
         y: p.y,
@@ -508,7 +516,11 @@ export function tickSim(w: SimWorld): void {
     { tripCost: (_r, d) => batteryForTrip(d) },
   );
   let demandKgH = 0;
-  for (const p of w.players) {
+  for (const [i, p] of w.players.entries()) {
+    if (i % shardCount !== shardIndex) {
+      if (robotDemands(p.state)) demandKgH += WORLD.DEMAND_REF_KG_H;
+      continue;
+    }
     if (stepRobot(w, p, clusterMap, now, dtReal, batchAssignments)) {
       demandKgH += WORLD.DEMAND_REF_KG_H;
     }

@@ -70,6 +70,8 @@ const schema = defineSchema(
       seedPollutionKg: v.optional(v.number()), // pollution at world start
       generatedKg: v.optional(v.number()), // cumulative generation this cycle
       invariantSkewKg: v.optional(v.number()),
+      // Sprint 2.6: monotonic tick counter (shard rotation for large worlds)
+      tickIndex: v.optional(v.number()),
     }),
 
     // waste clusters on the map — the collectable pool materialized spatially

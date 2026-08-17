@@ -44,6 +44,21 @@ is **unchanged** in v0.4 — see §13 for the v0.3 compliance matrix.
 | Invariant spec | Old single-equation physical invariant RETIRED. Official two-layer accounting: **Layer 1** `seed + generated == pollution + burned`; **Layer 2** `hidden + collectable + clusters + cargo + storage + processing == pollution − generated` (pool buckets are disjoint — never double-counted) | `engine.ts` §1, `harness:invariantAudit`, `DATABASE_SCHEMA.md` | live audit + all 64 tests |
 | Collapse consistency | Player-held waste (cargo/storage/processing) is lost with the world so Layer 2 stays exact on reset; balances and upgrades carry over | `world.ts` collapse branch + `engineSim.ts` | post-collapse invariant tests |
 
+---
+
+## SPRINT 2.6 — LIVE-DB LOAD & CONCURRENCY TEST (results on the real deployment)
+
+| Item | Result | Evidence |
+|---|---|---|
+| Concurrency — unguarded path | **PASS**: 5 concurrent `harness:tickOnce` — 5/5 advanced, 0 failed; generated delta = EXACT integer multiple of genPerTick (5 ours + 2 cron) ⇒ no lost update, no double apply | `tests/liveConcurrency.ts`, live run |
+| Concurrency — guarded path | **PASS**: 3 concurrent `world:tick` — never >1 advance per 1.6 s guard window (fresh guard: 1; after expiry: 1 over 4.7 s vs legit max 3). Convex serializable isolation + automatic conflict retry makes the non-atomic guard SAFE — **no guard fix required** | `tests/liveConcurrency.ts` |
+| Load 10 / 100 / 1,000 | **PASS live**: tick p50 <1 ms / 95 ms / 709 ms; both invariant layers ~1e-9; 0 duplicate reservations; ledger keys unique; genPerTick exact | `tests/liveBench.ts`, live runs |
+| Load 10,000 — finding 1 | Tick exceeded Convex's **4,096 DB-op-per-mutation** limit (10,001 per-player patches). Fixed: **sharded robot simulation** (`WORLD.ROBOTS_PER_TICK = 2500` — round-robin shards; worlds ≤ 2,500 unchanged) | `world.ts` tick §2, `gameParams.ts`, `engineSim.ts` parity, 64 tests pass |
+| Load 10,000 — finding 2 | Live re-run **BLOCKED by platform**: deployment disabled for exceeding the free-tier usage limit (cumulative session I/O). Re-enable/raise the limit in the Convex dashboard → `bun tests/liveBench.ts 10000 5` → cleanup | platform error, all calls failing |
+| Stranded data | 10,000 `LOADTEST` players + 1 synthetic user remain in the dev DB (cleanup could not run while disabled). Recover with looped `bunx convex run harness:cleanupLoad '{"limit":500}'` then `harness:resetWorld` | `harness:cleanupLoad` |
+
+New harness tools: `harness:seedLoad`, `harness:tickOnce` (unguarded, returns engine tickMs incl. DB ops), `harness:benchStatus`, `harness:cleanupLoad`, `harness:worldStateProbe`, `tests/liveBench.ts`, `tests/liveConcurrency.ts`.
+
 
 ---
 
@@ -472,17 +487,23 @@ baseline (`harness:resetWorld`) removed the pre-2.5 seed write-back bug that
 had leaked ~13.5 t of phantom pool mass.
 
 ## CRITICAL BLOCKERS
-1. No Solana integration of any kind (wallet, transactions, treasury) — SOL is
+1. **Dev deployment DISABLED by platform usage limit** (Sprint 2.6 load tests
+   exceeded the free-tier cap). Must be re-enabled/raised in the Convex
+   dashboard, then the stranded 10k `LOADTEST` players cleaned up
+   (`harness:cleanupLoad` loop → `harness:resetWorld`).
+2. No Solana integration of any kind (wallet, transactions, treasury) — SOL is
    mock by design under v0.4.
-2. `tick` concurrency guard is not atomic — theoretical double-advance exists
-   (unverified under concurrent clients).
 3. No production deployment configured (dev-only).
-4. No live-DB load test at 10k players (the 10k scale test runs the headless
-   oracle sim, not the Convex DB path).
+4. Live 10k benchmark unverified end-to-end: the 4,096-op ceiling is fixed by
+   sharding, but the final live run is pending the quota reset.
 5. Storage/Battery upgrade costs are P1 placeholders awaiting rebalance.
 
+(Resolved in Sprint 2.6: the non-atomic tick guard was verified SAFE under
+concurrency — double-advance cannot occur; no guard fix needed.)
+
 ## NEXT IMMEDIATE TASK
-**Run a live-DB load test on the clean world** (seed 10/100/1k/10k simulated
-players in a sandbox, drive `tick`, record per-tick timing + both invariant
-layers) — then rebalance Storage/Battery P1 costs using the recorded
-progression ROI.
+**Re-enable/raise the dev-deployment usage limit in the Convex dashboard**, run
+the looped `harness:cleanupLoad` + `harness:resetWorld` to restore the clean
+baseline, then re-run `bun tests/liveBench.ts 10000 5` to capture the final 10k
+latency numbers, and finally rebalance Storage/Battery P1 costs using the
+recorded progression ROI.

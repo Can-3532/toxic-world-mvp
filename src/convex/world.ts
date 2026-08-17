@@ -119,6 +119,7 @@ export async function seedWorld(
     seedPollutionKg: pollutionKg,
     generatedKg: 0,
     invariantSkewKg: 0,
+    tickIndex: 0,
   });
   // LOAD-BEARING (Sprint 2.5): spawnClusters deducts from the collectable
   // pool — the remaining balance MUST be written back, or the seeded clusters
@@ -368,25 +369,24 @@ async function stepBurnZone(
 }
 
 // ---------------------------------------------------------------------------
-// the world tick (driven by cron)
+// the world tick — shared body (cron `tick` + Sprint 2.6 load harness)
 // ---------------------------------------------------------------------------
 
-export const tick = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const now = Date.now();
-    const dtReal = WORLD.TICK_SECONDS;
+/**
+ * The world tick body. Shared by the cron-driven `tick` mutation and the
+ * Sprint 2.6 load harness (`harness:tickOnce`, which bypasses the rate-limit
+ * guard so the real deployment can be benchmarked back-to-back).
+ */
+export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
+  const dtReal = WORLD.TICK_SECONDS;
 
-    let world = await ctx.db.query("worlds").first();
-    if (!world) {
-      world = await seedWorld(ctx, now);
-    }
-    // rate-limit: the world may only advance once per tick window, so a
-    // client hammering this mutation cannot accelerate the simulation
-    if (now - world.lastTick < WORLD.TICK_SECONDS * 1000 * 0.8) return;
-    const worldId = world.worldId;
+  let world = await ctx.db.query("worlds").first();
+  if (!world) {
+    world = await seedWorld(ctx, now);
+  }
+  const worldId = world.worldId;
 
-    const players = await ctx.db
+  const players = await ctx.db
       .query("players")
       .withIndex("by_world", (q) => q.eq("worldId", worldId))
       .collect();
@@ -413,20 +413,31 @@ export const tick = mutation({
     let seedPollutionKg =
       world.seedPollutionKg ?? world.pollutionKg + world.burnedKg;
 
-    // 2) robots — Batch/Reservation plan first (Sprint 2.5): idle, auto
-    // robots with cargo room are matched against UNCLAIMED clusters once per
-    // tick, in ascending level order (low-level floor access), deterministic,
-    // battery-feasible. stepRobot then commits each planned reservation.
+    // 2) robots — Sprint 2.6 sharding first: Convex caps one mutation at
+    // ~4,096 DB ops, so worlds beyond ROBOTS_PER_TICK players step robots in
+    // round-robin shards (each robot advances every `shardCount` ticks).
+    // Worlds ≤ ROBOTS_PER_TICK keep the exact pre-2.6 behavior (shardCount 1).
+    const shardCount = Math.max(
+      1,
+      Math.ceil(players.length / WORLD.ROBOTS_PER_TICK),
+    );
+    const shardIndex = (world.tickIndex ?? 0) % shardCount;
+    // Batch/Reservation plan first (Sprint 2.5): idle, auto robots with cargo
+    // room are matched against UNCLAIMED clusters once per tick, ascending
+    // level order (low-level floor access), deterministic, battery-feasible.
+    // Only robots in THIS tick's shard can commit reservations.
     const batchAssignments = batchAllocation(
       players
+        .map((p, i) => ({ p, i }))
         .filter(
-          (p) =>
+          ({ p, i }) =>
+            i % shardCount === shardIndex &&
             p.hasBase &&
             p.robot.auto &&
             p.robot.state === "idle" &&
             p.robot.cargoKg < cargoCap(p),
         )
-        .map((p) => ({
+        .map(({ p }) => ({
           id: p._id,
           x: p.robot.x,
           y: p.robot.y,
@@ -440,7 +451,12 @@ export const tick = mutation({
       { tripCost: (_r, d) => batteryForTrip(d) },
     );
     let demandKgH = 0;
-    for (const p of players) {
+    for (const [i, p] of players.entries()) {
+      if (i % shardCount !== shardIndex) {
+        // unstepped this tick: a frozen mid-trip robot still generates demand
+        if (robotDemands(p.robot.state)) demandKgH += WORLD.DEMAND_REF_KG_H;
+        continue;
+      }
       const isActive = await stepRobot(ctx, p, clusterMap, now, dtReal, batchAssignments);
       if (isActive) demandKgH += WORLD.DEMAND_REF_KG_H;
     }
@@ -636,7 +652,29 @@ export const tick = mutation({
       generatedKg,
       seedPollutionKg,
       invariantSkewKg,
+      // Sprint 2.6 shard rotation counter
+      tickIndex: (world.tickIndex ?? 0) + 1,
     });
+}
+
+/**
+ * The public world tick, driven by the cron job `toxic-world-tick` (every 2 s).
+ * Rate-limited: the world may only advance once per tick window, so a client
+ * hammering this mutation cannot accelerate the simulation. Under Convex's
+ * serializable isolation + automatic conflict retry, concurrent invocations
+ * can never both advance the world (Sprint 2.6 concurrency test).
+ */
+export const tick = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const world = await ctx.db.query("worlds").first();
+    if (!world || now - world.lastTick < WORLD.TICK_SECONDS * 1000 * 0.8) {
+      return { advanced: false, tickMs: 0 };
+    }
+    const t0 = performance.now();
+    await runTick(ctx, now);
+    return { advanced: true, tickMs: performance.now() - t0 };
   },
 });
 

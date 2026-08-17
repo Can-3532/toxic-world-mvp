@@ -37,6 +37,11 @@ export const WORLD = {
   PROCESSING_KG_PER_S: 2, // burn rate (kg / real second)
   DEMAND_REF_KG_H: 42, // starter robot throughput reference (kg / game hour)
   BATCH_SIZE: 20, // Batch/Reservation: robots per allocation batch (Sprint 2.5)
+  // Sprint 2.6 scaling: Convex caps one mutation at ~4,096 DB ops, so a tick
+  // that patches every robot tops out around 3.5k players. Worlds beyond this
+  // step robots in round-robin shards (each robot advances every shardCount
+  // ticks) so 10k players fit in the budget. Worlds ≤ this are unchanged.
+  ROBOTS_PER_TICK: 2500,
 } as const;
 
 // --- v0.4 reward economy ---------------------------------------------

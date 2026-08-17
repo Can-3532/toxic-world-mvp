@@ -142,6 +142,35 @@ step-for-step. Coverage:
 bunx convex run harness:reanchorInvariant
 ```
 
+### Sprint 2.6 — live-DB load & concurrency test
+
+Tools (live deployment only, quota-frugal — always clean up immediately):
+
+```bash
+bun tests/liveConcurrency.ts              # concurrency: 5x unthrottled + guarded double-tick checks
+bun tests/liveBench.ts 10000 5 0.5 0.05   # live load: seed N players, N ticks, latency stats, cleanup
+bunx convex run harness:benchStatus       # counts + both invariant layers + dup checks
+# cleanup (loop until playersDeleted == 0):
+#   bunx convex run harness:cleanupLoad '{"limit":500}'
+```
+
+Results (real deployment):
+- **Concurrency: ALL PASS.** 5 concurrent unthrottled ticks: every advance added
+  exactly `+genPerTick` (exact-multiple accounting — no lost update, no double
+  apply); 3 concurrent guarded ticks: never two advances per 1.6 s guard window.
+  Convex's serializable isolation + automatic conflict retry makes the
+  non-atomic guard safe — **no guard fix needed**.
+- **Load: 10 / 100 / 1,000 players PASS** live (tick p50: <1 ms / 95 ms /
+  709 ms). Both invariant layers ~1e-9, 0 duplicate reservations, reward keys
+  unique, `genPerTick` exact.
+- **10,000 players — two findings:** (1) the tick exceeded Convex's 4,096
+  DB-op-per-mutation limit → fixed by **sharded robot simulation**
+  (`WORLD.ROBOTS_PER_TICK = 2500`: worlds beyond it step robots in round-robin
+  shards; worlds ≤ 2,500 are byte-for-byte unchanged). (2) the live 10k re-run
+  was blocked by the **platform disabling the deployment** for exceeding the
+  free-tier usage limit — raise/reset the limit in the Convex dashboard, then
+  re-run `bun tests/liveBench.ts 10000 5` and clean up.
+
 ### Sprint 2.5 — production consistency & clean world
 
 1. **Batch Allocation production compliance** — the tick no longer assigns
@@ -172,7 +201,12 @@ bunx convex run harness:reanchorInvariant
   with reward ledger + Burn Zones, persistence, auth, frontend, two-layer
   invariant telemetry per tick (`world.invariantSkewKg`), live audit
   (`harness:invariantAudit`), Batch/Reservation production compliance, clean
-  world baseline (`harness:resetWorld`).
+  world baseline (`harness:resetWorld`), Sprint 2.6 concurrency-verified tick
+  and sharded scaling (`ROBOTS_PER_TICK`).
+- **Blocked (platform):** the dev deployment was disabled after the Sprint 2.6
+  load tests exceeded the free-tier usage limit. Re-enable/raise the limit in
+  the Convex dashboard, run `harness:cleanupLoad` (loop) to remove the stranded
+  10k `LOADTEST` players, then re-run the 10k benchmark.
 - **Mock:** SOL balance (off-chain ledger) used only for the base purchase. No
   wallet, no Solana transaction.
 - **Not implemented:** real settlement, reward outbox for SOL payouts, protection
