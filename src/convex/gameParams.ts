@@ -10,8 +10,13 @@
 //    which is SIMULATED/MOCK (no wallet, no transaction).
 
 // Time model: the world ticks every TICK_SECONDS real seconds and each tick
-// advances GAME_MINUTES_PER_TICK game minutes (30x compression). All throughput
-// numbers below follow the design doc in kg per GAME hour.
+// advances GAME_MINUTES_PER_TICK game minutes (12x compression since Sprint
+// 2.7 B — was 30x at 2 s). All game-hour rates (generation, replenishment,
+// demand) are anchored to GAME_MINUTES_PER_TICK, so the per-tick deltas are
+// IDENTICAL to the pre-2.7 values; only the real-time cadence changed (a 10k
+// tick takes ~3.2 s, which fits the 5 s window instead of overflowing the old
+// 2 s cron — this killed the Sprint 2.6 cron drift). Real-time-anchored rates
+// (battery drain, robot travel, burner kg/s) are unchanged per real second.
 
 export const WORLD = {
   CAPACITY_KG: 10_000_000, // 10,000 ton world capacity
@@ -28,8 +33,10 @@ export const WORLD = {
   REWARD_USD_PER_TON: 10,
   TOX_PER_KG: 1, // legacy alias (1 TOX/kg = 1000 TOX/ton); kept for compat
   MAP_SIZE: 1000, // map is 1000 x 1000 units
-  TICK_SECONDS: 2, // real seconds between world ticks
-  GAME_MINUTES_PER_TICK: 1, // game minutes advanced per tick
+  // Sprint 2.7 B (tick frequency redesign): 5 real seconds per tick — a 10k
+  // tick (~3.2 s) now fits inside the cron window (was 2 s → overflow/drift).
+  TICK_SECONDS: 5, // real seconds between world ticks
+  GAME_MINUTES_PER_TICK: 1, // game minutes advanced per tick (unchanged)
   ACTIVE_CLUSTER_TARGET: 500, // clusters kept alive on the map
   CLUSTER_MIN_KG: 150,
   CLUSTER_MAX_KG: 900,

@@ -12,7 +12,7 @@
 //   bunx convex run harness:concurrencyProbe    — tick-guard atomicity (2.6)
 
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, MutationCtx } from "./_generated/server";
 import { api } from "./_generated/api";
 import { checkWasteInvariant, pollutionFrac } from "./engine";
 import { batteryCap } from "./game";
@@ -311,18 +311,45 @@ export const seedLoad = mutation({
 });
 
 /** Advance the world ONE tick with NO rate-limit guard, returning the engine
- * time (user code + DB ops) and the post-tick world snapshot. Benchmark-only. */
+ * time (user code + DB ops), the post-tick world snapshot, and Sprint 2.7
+ * DB-op counters (query/get = read op, insert/patch/delete = write op;
+ * docs fetched per query are not counted). Benchmark-only. */
 export const tickOnce = mutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
+    let dbReadOps = 0;
+    let dbWriteOps = 0;
+    // count DB operations through a proxy around ctx.db (runTick only touches
+    // ctx.db, so wrapping the context is safe)
+    const db = new Proxy(ctx.db, {
+      get(target, prop) {
+        const key = String(prop);
+        if (key === "insert" || key === "patch" || key === "delete") {
+          return (...args: unknown[]) => {
+            dbWriteOps += 1;
+            return (target as unknown as Record<string, (...a: unknown[]) => unknown>)[key](...args);
+          };
+        }
+        if (key === "query" || key === "get") {
+          return (...args: unknown[]) => {
+            dbReadOps += 1;
+            return (target as unknown as Record<string, (...a: unknown[]) => unknown>)[key](...args);
+          };
+        }
+        const v = (target as unknown as Record<string, unknown>)[key];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
     const t0 = performance.now();
-    await runTick(ctx, now);
+    await runTick({ ...ctx, db } as unknown as MutationCtx, now);
     const tickMs = performance.now() - t0;
     const world = await ctx.db.query("worlds").first();
     return {
       advanced: true,
       tickMs,
+      dbReadOps,
+      dbWriteOps,
       world: world
         ? {
             worldId: world.worldId,

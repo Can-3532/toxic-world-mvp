@@ -1,4 +1,4 @@
-# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5)
+# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7)
 
 Verified against the repository on disk (Freebuff Web / Vly sandbox).
 Everything below is grounded in actual files; anything not in the repo is
@@ -50,6 +50,18 @@ is **unchanged** in v0.4 — see §13 for the v0.3 compliance matrix.
 | Collapse consistency | Player-held waste (cargo/storage/processing) is lost with the world so Layer 2 stays exact on reset; balances and upgrades carry over | `world.ts` collapse branch + `engineSim.ts` | post-collapse invariant tests |
 
 ---
+
+## SPRINT 2.7 — TICK ARCHITECTURE (A/B/C decision, measured on dev)
+
+| Item | Result | Evidence |
+|---|---|---|
+| A — production benchmark | **BLOCKED at credentials**: no prod deployment exists; env authenticates with `CONVEX_DEPLOY_KEY`, which cannot create deployments (needs interactive `convex login` / dashboard). Runbook in NEXT IMMEDIATE TASK | `convex deployment create` error |
+| B — tick frequency redesign | **IMPLEMENTED**: `WORLD.TICK_SECONDS 2 → 5` (1 game min/tick). Game-hour rates unchanged per tick (`GAME_MINUTES_PER_TICK`-anchored); real-second rates unchanged (battery/travel/burner kg/s); burner slice per tick 4 → 10 kg. Economy re-tested: 55 tests green | `gameParams.ts`, `tests/engine.test.ts` (expectations now derived from constants) |
+| B — live 10k (dev, 5 s tick) | tick 1,779–3,644 ms (p50 ≈ 2.4 s, p95 ≈ 3.6 s); DB ops/tick ≈ 200 reads + 476–976 writes; invariants ~1e-10; skew 9.3e-10 | `harness:tickOnce` counters + `benchStatus` |
+| B — cron drift | **ELIMINATED**: completions exactly 5.0 s apart (ticks 22→23→24→25→26); pre-B the 2 s cron backed up behind 3.3 s ticks (world ran ~60% real-time, lastTickAge 4.4–7.1 s) | `worldStateProbe` cadence sampling |
+| B — economy deltas to re-review | compression 30× → 12× (game progress per real hour 2.5× slower — real-time progression identical because burn/generation scale together); per-game-hour burner throughput 240 → 600 kg/h (same 2 kg/s real) — storage pressure per game hour rises; flag for design sign-off | constants + tests |
+| C — sharded world engine | **DEFERRED (not implemented)**: spatial region shards for robots/clusters remain the 50k+ scale path; B satisfies the MVP (10k tick fits its window) without the migration | decision report |
+| Instrumentation | `harness:tickOnce` now returns `dbReadOps` / `dbWriteOps` (query/get = read op, insert/patch/delete = write op) for dev-vs-prod comparison | `harness.ts` |
 
 ## SPRINT 2.6 — LIVE-DB LOAD & CONCURRENCY TEST (results on the real deployment)
 
@@ -517,14 +529,20 @@ concurrency — double-advance cannot occur; no guard fix needed. Continuation
 added: burn-loop sharding for the 10k write budget and the `advanceBurn`
 idempotency-contract fix, both covered by the headless suite.)
 
-## NEXT IMMEDIATE TASK (Sprint 2.6 live leg COMPLETE — see §SPRINT 2.6)
-The live sequence was executed end-to-end and the deployment is back on the
-pristine World 0 baseline. Remaining:
-1. **10k performance target (< 1 s) NOT met** (p50 ≈ 3.1–3.4 s on the dev
-   deployment). Decide the path: (a) production (non-dev) Convex deployment
-   and re-measure, or (b) restructure the tick into parallel per-shard
-   mutations (each shard its own mutation + world write serialized), or
-   (c) accept ~3 s as the MVP cadence and lengthen the cron interval
-   (`WORLD.TICK_SECONDS`) so cron drift disappears.
+## NEXT IMMEDIATE TASK (Sprint 2.7 — A is the only open item)
+1. **Unblock solution A** — create a production deployment for this project:
+   Convex dashboard → project `e534bc6b…` → Deployments → create production
+   (or provide a prod deploy key). Then:
+   ```
+   CONVEX_DEPLOYMENT=<prod-url> bunx convex deploy
+   bunx convex run harness:resetWorld --prod
+   bunx convex run harness:seedLoad '{"count":2000,...}' --prod  (×5)
+   bunx convex run harness:tickOnce --prod                     (×6, read tickMs + dbReadOps/dbWriteOps)
+   bunx convex run harness:benchStatus --prod && bunx convex run harness:invariantAudit --prod
+   bunx convex run harness:cleanupLoad '{"limit":500}' --prod (loop) && bunx convex run harness:resetWorld --prod
+   ```
+   Compare DEV vs PROD p50/p95 (DEV: 2.4/3.6 s at 10k). If PROD < 1 s, the
+   architecture is fine — deploy and re-measure; if PROD ≈ DEV (~3 s), B is
+   the right MVP answer and C is the future scale path.
 2. Rebalance Storage/Battery P1 costs using the recorded progression ROI.
 3. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.

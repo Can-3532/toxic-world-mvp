@@ -18,6 +18,10 @@
 
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
+import { WORLD } from "../src/convex/gameParams";
+
+// the rate-limit guard window = 80% of the tick interval (world.ts `tick`)
+const GUARD_WINDOW_MS = WORLD.TICK_SECONDS * 1000 * 0.8;
 
 function parseJson(out: string): any {
   const s = out.indexOf("{");
@@ -107,11 +111,11 @@ async function main(): Promise<void> {
   // bound by how many full windows the slowest tick spanned.
   const maxTickMs = Math.max(...guarded.map((r) => r.tickMs ?? 0));
   const allowed =
-    maxTickMs < 1600 ? 1 : 1 + Math.floor(maxTickMs / 1600);
-  // The cron fires every 2 s and may legitimately advance inside our
+    maxTickMs < GUARD_WINDOW_MS ? 1 : 1 + Math.floor(maxTickMs / GUARD_WINDOW_MS);
+  // The cron fires every TICK_SECONDS and may legitimately advance inside our
   // measurement window (each in its own guard window). Bound total world
   // advancement by our advances + the number of cron windows that fit.
-  const cronCeiling = Math.ceil(wallMs / 1600);
+  const cronCeiling = Math.ceil(wallMs / GUARD_WINDOW_MS);
   const guardedPass =
     gAdvanced <= allowed &&
     tickIndexDelta >= gAdvanced &&

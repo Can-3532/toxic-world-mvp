@@ -92,7 +92,8 @@ UI, never in committed files. Real Solana vars (`COINBASE_COMMERCE_*`,
 
 ## The game loop (server-side)
 
-1. Every 2 s the cron `toxic-world-tick` calls `api.world.tick` (1 tick = 1 game minute).
+1. Every 5 s the cron `toxic-world-tick` calls `api.world.tick` (1 tick = 1 game
+   minute — Sprint 2.7 B; was 2 s, which a 10k tick (~3.2 s) overflowed).
 2. Bases generate `50 kg/h` each → `pollutionKg` (global waste).
 3. Robots (spatial: position/speed/battery/cargo) travel to clusters
    (150–900 kg), collect up to cargo capacity, return, unload to storage.
@@ -141,6 +142,33 @@ step-for-step. Coverage:
 # fields seedPollutionKg/generatedKg from first principles):
 bunx convex run harness:reanchorInvariant
 ```
+
+### Sprint 2.7 — tick architecture (A/B/C decision)
+
+- **A — production benchmark: BLOCKED at credentials.** No production
+  deployment exists for this project and this environment authenticates with a
+  deploy key (`CONVEX_DEPLOY_KEY`) that cannot create deployments (interactive
+  `convex login` is not possible here). Runbook once a prod deployment exists
+  (create it in the Convex dashboard, or supply a prod deploy key):
+  `CONVEX_DEPLOYMENT=<prod-url> bunx convex deploy`, then the same bench with
+  `bunx convex run ... --prod` (see README top-level bench commands).
+- **B — tick frequency redesign: IMPLEMENTED.** `WORLD.TICK_SECONDS 2 → 5`
+  (1 game minute per tick unchanged). Per-game-hour rates (generation,
+  replenishment, Model C, demand) are anchored to `GAME_MINUTES_PER_TICK` and
+  are byte-identical per tick; real-time-anchored rates (battery, travel) are
+  unchanged per real second; the real-time-anchored burner slice grew 4 →
+  10 kg/tick (same 2 kg/s real). Economy re-tested: `bun test tests/` 55 pass.
+  Live 10k dev bench: tick 1.8–3.6 s (p50 ≈ 2.4 s, p95 ≈ 3.6 s), DB ops/tick
+  ~200 reads + ~500–1,000 writes, invariants ~1e-10, and the cron now completes
+  **exactly every 5.0 s — cron drift eliminated** (pre-B the 2 s schedule
+  backed up behind 3.3 s ticks and the world ran at ~60% real-time).
+  Trade-off: compression changed 30× → 12× (game progress per real hour is
+  2.5× slower); per-game-hour burner throughput 240 → 600 kg/h (same per real
+  second).
+- **C — sharded world engine: NOT implemented (deferred).** Spatial
+  sharding (region-based robot/cluster partitions, per-shard processing)
+  remains the scale path for 50k+ players, but B already satisfies the MVP
+  (10k tick fits its window) without the migration cost.
 
 ### Sprint 2.6 — live-DB load & concurrency test
 

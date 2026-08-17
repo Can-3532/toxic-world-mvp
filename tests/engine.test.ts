@@ -200,14 +200,16 @@ describe("5. burn reward (sim-level)", () => {
     const sim = new Sim({ players: [p], seed: 3 });
     sim.zone.status = "inactive";
     const pollutionBefore = sim.world.pollutionKg;
+    const burnPerTick = WORLD.PROCESSING_KG_PER_S * WORLD.TICK_SECONDS;
     sim.tick(10_000);
-    expect(p.toxBalance).toBeCloseTo(2, 6); // 4 kg × 0.5 TOX/kg
-    expect(p.totalBurnedKg).toBeCloseTo(4, 6);
-    expect(p.processing.queuedKg).toBeCloseTo(96, 6);
+    // burner is real-time anchored: slice = kg/s × tick seconds
+    expect(p.toxBalance).toBeCloseTo(burnPerTick * 0.5, 6);
+    expect(p.totalBurnedKg).toBeCloseTo(burnPerTick, 6);
+    expect(p.processing.queuedKg).toBeCloseTo(100 - burnPerTick, 6);
     // pollution = before + 1 base's generation (50 kg/h × 1 game min) − burn
     const genPerTick = WORLD.BASE_GEN_KG_H / 60;
     expect(sim.world.pollutionKg).toBeCloseTo(
-      pollutionBefore + genPerTick - 4,
+      pollutionBefore + genPerTick - burnPerTick,
       3,
     );
   });
@@ -216,14 +218,15 @@ describe("5. burn reward (sim-level)", () => {
     const sim = new Sim({ players: [p], seed: 3 });
     sim.zone.status = "active";
     sim.zone.expiresAt = Number.MAX_SAFE_INTEGER; // stays active for the tick
+    const burnPerTick = WORLD.PROCESSING_KG_PER_S * WORLD.TICK_SECONDS;
     sim.tick(10_000);
-    expect(p.toxBalance).toBeCloseTo(2.4, 6);
-    expect(p.toxFromZone).toBeCloseTo(2.4, 6);
+    expect(p.toxBalance).toBeCloseTo(burnPerTick * 0.6, 6);
+    expect(p.toxFromZone).toBeCloseTo(burnPerTick * 0.6, 6);
     expect(p.toxFromNormal).toBe(0);
     // zone and normal remove the same mass from pollution
     const genPerTick = WORLD.BASE_GEN_KG_H / 60;
     expect(sim.world.pollutionKg).toBeCloseTo(
-      WORLD.CAPACITY_KG * WORLD.INITIAL_POLLUTION_FRAC + genPerTick - 4,
+      WORLD.CAPACITY_KG * WORLD.INITIAL_POLLUTION_FRAC + genPerTick - burnPerTick,
       3,
     );
   });
@@ -246,8 +249,9 @@ describe("6. idempotency", () => {
     const sim = new Sim({ players: [p], seed: 4 });
     sim.tick(10_000);
     sim.tick(10_000); // same wall time, second tick — new slice index
-    expect(p.toxBalance).toBeCloseTo(4, 6); // 2 slices × 4 kg
-    expect(p.totalBurnedKg).toBeCloseTo(8, 6);
+    const burnPerTick = WORLD.PROCESSING_KG_PER_S * WORLD.TICK_SECONDS;
+    expect(p.toxBalance).toBeCloseTo(2 * burnPerTick * 0.5, 6); // 2 slices
+    expect(p.totalBurnedKg).toBeCloseTo(2 * burnPerTick, 6);
     const keys = [...sim.ledgerKeys];
     expect(keys.length).toBe(2);
     expect(new Set(keys).size).toBe(2); // unique
