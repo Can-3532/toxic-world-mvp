@@ -64,6 +64,12 @@ const schema = defineSchema(
       resetCount: v.number(),
       startedAt: v.number(),
       lastTick: v.number(),
+      // Sprint 2.4 harness telemetry — waste invariant (mass balance).
+      // pollutionKg + burnedKg == seedPollutionKg + generatedKg must hold
+      // after every tick; invariantSkewKg records |residual| for the audit.
+      seedPollutionKg: v.optional(v.number()), // pollution at world start
+      generatedKg: v.optional(v.number()), // cumulative generation this cycle
+      invariantSkewKg: v.optional(v.number()),
     }),
 
     // waste clusters on the map — the collectable pool materialized spatially

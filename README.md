@@ -49,10 +49,16 @@ src/
     schema.ts                  # tables: users, worlds, wasteClusters, players, worldEvents, burnZones, rewardLedger
     gameParams.ts              # economy constants (Design Freeze v0.4) — shared w/ frontend
     economy.ts                 # pure v0.4 reward formulas + idempotency keys (unit-tested)
-    world.ts                   # world engine: tick, seed, burn-zone lifecycle, queries
+    engine.ts                  # pure engine math: invariant, Model C, pollution %, status, allocation (shared w/ tick + tests)
+    world.ts                   # world engine: tick, seed, burn-zone lifecycle, queries, invariant telemetry
     game.ts                    # player mutations + queries
     crons.ts                   # toxic-world-tick (every 2 s) — MUST be named crons.ts
+    harness.ts                 # Sprint 2.4 QA: live invariantAudit + one-time reanchorInvariant
     auth.ts / auth.config.ts / http.ts / users.ts / auth/emailOtp.ts
+tests/
+  economy.test.ts              # v0.4 reward formulas, idempotency, pollution accounting, progression ROI
+  engineSim.ts                 # deterministic headless oracle simulator (same engine.ts/economy.ts functions)
+  engine.test.ts               # Sprint 2.4 production engine test harness (10 scenarios, incl. 10k-player scale)
 ```
 
 ## Local setup
@@ -100,18 +106,54 @@ UI, never in committed files. Real Solana vars (`COINBASE_COMMERCE_*`,
 ## Tests
 
 ```bash
-bun test tests/economy.test.ts   # 26 tests — v0.4 reward formulas, idempotency, pollution accounting, progression ROI
+bun test tests/                 # all 58 tests (economy + engine harness)
+bun test tests/engine.test.ts   # Sprint 2.4 production engine test harness
+bun test tests/economy.test.ts  # v0.4 reward formulas, idempotency, pollution accounting
+
+# Live invariant audit against the deployed Convex engine (read-only):
+bunx convex run harness:invariantAudit
 ```
+
+### Sprint 2.4 engine test harness (`tests/engine.test.ts`)
+
+The headless harness validates the production engine math on the **same pure
+functions the tick calls** (`engine.ts`, `economy.ts`, `gameParams.ts`), via a
+deterministic oracle simulator (`tests/engineSim.ts`) that mirrors `world.ts`
+step-for-step. Coverage:
+
+1. **Waste invariant** — every tick: `pollution + burned == seed + generated`
+   (mass balance) and pool conservation; also verified live via
+   `world.invariantSkewKg` after every production tick.
+2. **Pollution** — `pollution/capacity × 100` matches state at 0–100%.
+3. **Dynamic Replenishment Model C** — `clip(0.05 × demand/generation, 5%, 9%)`.
+4. **Batch Allocation** — low-level base access, high-level pool consumption,
+   mixed populations, no double-reservation.
+5. **Burn reward** — normal 500 TOX/t, Burn Zone 600 TOX/t, pollution drops 1:1.
+6. **Idempotency** — the same session/slice can never credit TOX twice.
+7. **World Collapse** — 99.999% → 100% → reset at 22.5%, post-collapse freeze.
+8. **Critical recovery** — from 90%, burn > generation ⇒ pollution falls.
+9. **Active/inactive** — 100 / 75 / 50 / 25% robot activity scaling.
+10. **Scale** — 10 / 100 / 1,000 / 10,000 players; invariant holds at every
+    scale; per-tick timings recorded.
+
+```bash
+# One-time repair for worlds created before Sprint 2.4 (adds the telemetry
+# fields seedPollutionKg/generatedKg from first principles):
+bunx convex run harness:reanchorInvariant
+```
+
 
 ## Status (honest)
 
 - **Real:** world engine (cron-driven every 2s), spatial robots, v0.4 TOX economy
-  with reward ledger + Burn Zones, persistence, auth, frontend.
+  with reward ledger + Burn Zones, persistence, auth, frontend, invariant
+  telemetry per tick (`world.invariantSkewKg`), live audit (`harness:invariantAudit`).
 - **Mock:** SOL balance (off-chain ledger) used only for the base purchase. No
   wallet, no Solana transaction.
 - **Not implemented:** real settlement, reward outbox for SOL payouts, protection
   systems (Base Lock / AFK / Shield / Emergency Launch), leaderboard pagination,
-  load tests.
+  live-DB load tests at 10k players (the 10k scale test runs the headless
+  oracle sim, not the Convex DB path).
 
 See `TOXIC_WORLD_ENGINEERING_HANDOFF_v0.1.md` for the full engineering handoff,
 known risks, and the next-task list.

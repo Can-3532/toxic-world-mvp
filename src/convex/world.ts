@@ -4,7 +4,6 @@ import { Doc, Id } from "./_generated/dataModel";
 import {
   BURN_ZONE,
   BURN_ZONE_MULTIPLIER,
-  REPLENISHMENT,
   ROBOT,
   UPGRADES,
   WORLD,
@@ -16,6 +15,13 @@ import {
   computeBurnSlice,
   type BurnSlice,
 } from "./economy";
+import {
+  checkWasteInvariant,
+  replenishmentModelC,
+  robotDemands,
+  selectCluster,
+  worldStatus,
+} from "./engine";
 import { batteryCap, cargoCap, storageCap } from "./game";
 
 const TICK_GAME_H = WORLD.GAME_MINUTES_PER_TICK / 60; // game hours per tick
@@ -102,6 +108,10 @@ async function seedWorld(ctx: MutationCtx, now: number): Promise<Doc<"worlds">> 
     resetCount: 0,
     startedAt: now,
     lastTick: now,
+    // Sprint 2.4 harness telemetry — waste invariant anchoring
+    seedPollutionKg: pollutionKg,
+    generatedKg: 0,
+    invariantSkewKg: 0,
   });
   const world = (await ctx.db.get(id)) as Doc<"worlds">;
   await spawnClusters(ctx, 0, world.collectableKg, WORLD.ACTIVE_CLUSTER_TARGET, 0);
@@ -131,7 +141,6 @@ async function stepRobot(
   const base = { x: p.baseX ?? WORLD.MAP_SIZE / 2, y: p.baseY ?? WORLD.MAP_SIZE / 2 };
   const r = { ...p.robot };
   const pl = { ...p };
-  let demand = false;
 
   const bCap = batteryCap(p);
   const rechargeRate = UPGRADES.recharge.rates[p.levels.recharge - 1];
@@ -166,17 +175,11 @@ async function stepRobot(
         pl.totalCollectedKg += unload;
       }
       if (r.auto && r.cargoKg < cCap) {
-        let best: Doc<"wasteClusters"> | null = null;
-        let bestD = Infinity;
-        for (const c of clusterMap.values()) {
-          if (c.kg <= 0 || c.reservedBy) continue;
-          const d = dist(r, c);
-          if (d < bestD) {
-            bestD = d;
-            best = c;
-          }
-        }
-        if (best) {
+        // Batch/Reservation: nearest unclaimed cluster (engine.ts selectCluster)
+        const found = selectCluster(r, [...clusterMap.values()]);
+        if (found) {
+          const best = found.cluster as Doc<"wasteClusters">;
+          const bestD = found.distance;
           const tripBattery = batteryForTrip(bestD);
           if (r.battery >= tripBattery) {
             await ctx.db.patch(best._id, { reservedBy: p._id, reservedAt: now });
@@ -218,7 +221,6 @@ async function stepRobot(
         r.state = "collecting";
         r.busyUntil = now + ROBOT.COLLECT_TIME_S * 1000;
       }
-      demand = true;
       break;
     }
     case "collecting": {
@@ -241,7 +243,6 @@ async function stepRobot(
         await releaseReservation();
         await goHome(target ? target.x : r.x, target ? target.y : r.y);
       }
-      demand = true;
       break;
     }
     case "to_base": {
@@ -258,7 +259,6 @@ async function stepRobot(
         r.state = "unloading";
         r.busyUntil = now + ROBOT.UNLOAD_TIME_S * 1000;
       }
-      demand = true;
       break;
     }
     case "unloading": {
@@ -288,7 +288,8 @@ async function stepRobot(
     totalCollectedKg: pl.totalCollectedKg,
     robot: r,
   });
-  return demand;
+  // demand predicate shared with the harness (engine.ts robotDemands)
+  return robotDemands(r.state);
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +383,13 @@ export const tick = mutation({
       world.capacityKg,
       world.pollutionKg + genKgH * TICK_GAME_H,
     );
+    // Sprint 2.4 harness: cumulative generation + invariant anchor
+    // (mass balance: pollutionKg + burnedKg == seedPollutionKg + generatedKg)
+    let generatedKg = (world.generatedKg ?? 0) + genKgH * TICK_GAME_H;
+    // legacy worlds (pre-Sprint 2.4) have no seedPollutionKg: re-anchor so the
+    // invariant starts at exactly 0 (seed = total waste ever: pollution + burned)
+    let seedPollutionKg =
+      world.seedPollutionKg ?? world.pollutionKg + world.burnedKg;
 
     // 2) robots
     let demandKgH = 0;
@@ -404,12 +412,8 @@ export const tick = mutation({
       }
     }
 
-    // 3) dynamic replenishment — Model C (unchanged from v0.3)
-    const ratio = genKgH > 0 ? demandKgH / genKgH : 0;
-    const replFracH = Math.min(
-      REPLENISHMENT.MAX_FRAC,
-      Math.max(REPLENISHMENT.MIN_FRAC, REPLENISHMENT.BASE_FRAC * ratio),
-    );
+    // 3) dynamic replenishment — Model C (engine.ts, shared with the harness)
+    const replFracH = replenishmentModelC(genKgH, demandKgH);
     const unlockKg = Math.min(world.hiddenKg, world.hiddenKg * replFracH * TICK_GAME_H);
     let collectableKg = world.collectableKg + unlockKg;
     let hiddenKg = world.hiddenKg - unlockKg;
@@ -501,13 +505,8 @@ export const tick = mutation({
       await ctx.db.patch(p._id, patch);
     }
 
-    // 7) world status / collapse
-    let status: Doc<"worlds">["status"] =
-      pollutionKg >= world.capacityKg
-        ? "collapsed"
-        : pollutionKg / world.capacityKg >= WORLD.CRITICAL_FRAC
-          ? "critical"
-          : "safe";
+    // 7) world status / collapse (engine.ts worldStatus — shared with the harness)
+    let status: Doc<"worlds">["status"] = worldStatus(pollutionKg, world.capacityKg);
     let newWorldId = worldId;
     if (pollutionKg >= world.capacityKg) {
       await addEvent(
@@ -525,6 +524,10 @@ export const tick = mutation({
       collectableKg = pollutionKg * WORLD.INITIAL_COLLECTABLE_FRAC;
       hiddenKg = pollutionKg - collectableKg;
       status = "safe";
+      // re-anchor the waste invariant for the new world cycle
+      burnedKg = 0;
+      generatedKg = 0;
+      seedPollutionKg = pollutionKg;
       for (const p of players) {
         const bx = p.baseX ?? WORLD.MAP_SIZE / 2;
         const by = p.baseY ?? WORLD.MAP_SIZE / 2;
@@ -547,6 +550,11 @@ export const tick = mutation({
       await addEvent(ctx, newWorldId, "spawn", `World ${newWorldId} seeded — fresh pool unlocked`);
     }
 
+    // Sprint 2.4 harness: waste invariant mass balance (should be ~0 every tick)
+    const invariantSkewKg = Math.abs(
+      pollutionKg + burnedKg - seedPollutionKg - generatedKg,
+    );
+
     await ctx.db.patch(world._id, {
       worldId: newWorldId,
       pollutionKg,
@@ -559,6 +567,10 @@ export const tick = mutation({
       activePlayers: active.length,
       resetCount: world.resetCount + (newWorldId !== worldId ? 1 : 0),
       lastTick: now,
+      // Sprint 2.4 harness telemetry — waste invariant (mass balance)
+      generatedKg,
+      seedPollutionKg,
+      invariantSkewKg,
     });
   },
 });
