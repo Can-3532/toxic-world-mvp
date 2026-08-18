@@ -138,6 +138,401 @@ export interface SimState {
 }
 
 // ---------------------------------------------------------------------------
+// SPRINT 2.13 — MANUAL ROBOT SYSTEM
+// ---------------------------------------------------------------------------
+// Player-controlled robot with WASD movement, battery risk management,
+// waste disposal choice (Base vs Burn Zone), and 1-minute processing.
+// ---------------------------------------------------------------------------
+
+export type BatteryWarningState = "normal" | "low_battery" | "critical_battery" | "returning" | "battery_depleted";
+
+export interface ManualInput {
+  dx: number; // -1, 0, or 1 (horizontal)
+  dy: number; // -1, 0, or 1 (vertical)
+}
+
+export interface ProcessingTransit {
+  active: boolean;
+  kg: number;
+  startedAt: number;
+  completesAt: number; // startedAt + 60_000
+  sessionId?: string;
+  sliceIndex: number;
+}
+
+export interface ManualRobotState {
+  /** Player-driven movement direction (normalized) */
+  input: ManualInput;
+  /** Whether the robot is currently moving based on input */
+  isMoving: boolean;
+  /** Current battery warning state */
+  batteryState: BatteryWarningState;
+  /** Battery at the moment low_battery warning triggered */
+  lowBatteryRef: number;
+  /** Distance from base at the moment low_battery warning triggered */
+  lowBatteryDistanceRef: number;
+  /** Whether player has been offered cargo-drop option */
+  cargoDropOffered: boolean;
+  /** Whether player has dropped cargo */
+  cargoDropped: boolean;
+  /** Processing transit state */
+  processingTransit: ProcessingTransit;
+  /** Total distance travelled (for stats) */
+  totalDistanceTravelled: number;
+}
+
+/** Calculate distance from robot to base */
+export function distToBase(robot: SimRobot, baseX: number, baseY: number): number {
+  return dist(robot, { x: baseX, y: baseY });
+}
+
+/** Calculate energy required to return to base from current position */
+export function returnEnergyRequired(robot: SimRobot, baseX: number, baseY: number): number {
+  const d = distToBase(robot, baseX, baseY);
+  const travelTime = d / ROBOT.SPEED_M_S;
+  return travelTime * ROBOT.DRAIN_MOVING + ROBOT.BATTERY_SAFETY_MARGIN;
+}
+
+/** Calculate energy required to reach a specific point */
+export function energyToReach(
+  fromX: number, fromY: number,
+  toX: number, toY: number,
+): number {
+  const d = Math.hypot(toX - fromX, toY - fromY);
+  return (d / ROBOT.SPEED_M_S) * ROBOT.DRAIN_MOVING;
+}
+
+/** Determine battery warning state based on current conditions */
+export function computeBatteryState(
+  battery: number,
+  baseX: number, baseY: number,
+  robotX: number, robotY: number,
+  lowBatteryRef: number,
+  lowBatteryDistanceRef: number,
+): BatteryWarningState {
+  const retCost = returnEnergyRequired({ x: robotX, y: robotY, battery } as SimRobot, baseX, baseY);
+  const batteryRatio = battery / (retCost || 1);
+
+  if (battery <= 0) return "battery_depleted";
+  if (batteryRatio <= 1.0) return "critical_battery";
+  if (batteryRatio <= 1.3) return "low_battery";
+  return "normal";
+}
+
+/** 
+ * Check if player has moved 10% additional distance away from base
+ * AFTER the low_battery warning. The %10 rule: if the robot travels
+ * additional distance equal to 10% of the return distance at the moment
+ * of low battery warning, in ANY direction that increases total distance.
+ */
+export function checkCriticalDeviation(
+  robotX: number, robotY: number,
+  baseX: number, baseY: number,
+  lowBatteryDistanceRef: number,
+): boolean {
+  const currentDist = distToBase({ x: robotX, y: robotY } as SimRobot, baseX, baseY);
+  const thresholdIncrease = lowBatteryDistanceRef * 0.10; // %10 rule
+  return currentDist > lowBatteryDistanceRef + thresholdIncrease;
+}
+
+/** Process manual movement for one tick */
+export function stepManualRobot(
+  p: SimPlayer,
+  manualState: ManualRobotState,
+  clusterMap: Map<string | number, SimCluster>
+    | Map<string | number, { id: string | number; x: number; y: number; kg: number; reservedBy?: string | number }>,
+  now: number,
+  dtReal: number,
+  drainMult: number,
+  burnZone: { x: number; y: number; status: string },
+): { demandActive: boolean; events: string[] } {
+  const events: string[] = [];
+  const base = { x: p.baseX, y: p.baseY };
+  const r = { ...p.robot };
+  const bCap = batteryCap(p);
+  const rechargeRate = UPGRADES.recharge.rates[p.levels.recharge - 1];
+  const cCap = cargoCap(p);
+  const sCap = storageCap(p);
+  const ms = manualState;
+
+  // Process recharge if at base
+  if (r.state === "recharging") {
+    r.battery = Math.min(bCap, r.battery + rechargeRate * dtReal);
+    if (r.battery >= bCap) {
+      r.battery = bCap;
+      r.state = "idle";
+    }
+    p.robot = r;
+    return { demandActive: false, events };
+  }
+
+  // Process unloading if at base
+  if (r.state === "unloading") {
+    if (now >= (r.busyUntil ?? now)) {
+      const space = sCap - p.storageKg;
+      const unload = Math.min(r.cargoKg, space);
+      p.storageKg += unload;
+      p.totalCollectedKg += unload;
+      r.cargoKg -= unload;
+      r.state = r.battery < bCap * ROBOT.LOW_BATTERY_FRAC ? "recharging" : "idle";
+    }
+    p.robot = r;
+    return { demandActive: false, events };
+  }
+
+  // Process collecting if at a cluster
+  if (r.state === "collecting") {
+    r.battery = Math.max(0, r.battery - ROBOT.DRAIN_COLLECTING * dtReal * drainMult);
+    if (now >= (r.busyUntil ?? now)) {
+      const target = r.targetClusterId ? clusterMap.get(r.targetClusterId) : undefined;
+      if (target && target.kg > 0) {
+        const amount = Math.min(cCap - r.cargoKg, target.kg);
+        r.cargoKg += amount;
+        target.kg -= amount;
+        if (target.kg <= 0) clusterMap.delete(target.id);
+      }
+      r.state = "idle";
+      r.targetClusterId = undefined;
+      events.push("collected");
+    }
+    p.robot = r;
+    return { demandActive: false, events };
+  }
+
+  // Manual movement (idle or to_cluster state)
+  const hasInput = ms.input.dx !== 0 || ms.input.dy !== 0;
+
+  if (hasInput && r.state !== "recharging" && r.state !== "unloading") {
+    // Normalize direction
+    const len = Math.hypot(ms.input.dx, ms.input.dy) || 1;
+    const ndx = ms.input.dx / len;
+    const ndy = ms.input.dy / len;
+
+    // Calculate movement
+    const moveDist = ROBOT.SPEED_M_S * dtReal;
+    const newX = r.x + ndx * moveDist;
+    const newY = r.y + ndy * moveDist;
+
+    // Clamp to map boundaries
+    r.x = Math.max(0, Math.min(WORLD.MAP_SIZE, newX));
+    r.y = Math.max(0, Math.min(WORLD.MAP_SIZE, newY));
+
+    // Drain battery
+    r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
+    ms.totalDistanceTravelled += moveDist;
+    ms.isMoving = true;
+    r.state = "idle"; // manual robot is always in idle state when moving
+  } else {
+    ms.isMoving = false;
+  }
+
+  // Auto-recharge when at base and low battery
+  if (distToBase(r, base.x, base.y) < 5 && r.battery < bCap * ROBOT.LOW_BATTERY_FRAC && r.cargoKg === 0) {
+    r.state = "recharging";
+    p.robot = r;
+    return { demandActive: false, events };
+  }
+
+  // Check for cluster collection (proximity-based)
+  if (ms.isMoving && r.cargoKg < cCap) {
+    for (const [id, c] of clusterMap) {
+      if (c.kg <= 0 || c.reservedBy) continue;
+      if (dist(r, c) < 15 && r.battery > returnEnergyRequired(r, base.x, base.y)) {
+        r.state = "collecting" as const;
+        r.targetClusterId = id;
+        r.busyUntil = now + ROBOT.COLLECT_TIME_S * 1000;
+        c.reservedBy = p.id;
+        events.push("collecting_started");
+        break;
+      }
+    }
+  }
+
+  // Check for burn zone delivery (proximity-based)
+  if (r.cargoKg > 0 && burnZone.status === "active") {
+    const bzDist = dist(r, burnZone);
+    if (bzDist < 20) {
+      // Deliver to burn zone
+      const kg = r.cargoKg;
+      const tox = (kg / 1000) * TOX_PER_TON * BURN_ZONE_MULTIPLIER;
+      r.cargoKg = 0;
+      p.toxBalance += tox;
+      p.totalBurnedKg += kg;
+      p.toxFromZone += tox;
+      events.push(`burn_zone_delivery:${kg}:${tox}`);
+    }
+  }
+
+  // Check for base arrival (proximity-based)
+  if (r.cargoKg > 0 && distToBase(r, base.x, base.y) < 15) {
+    // Unload to storage
+    const space = sCap - p.storageKg;
+    const unload = Math.min(r.cargoKg, space);
+    if (unload > 0) {
+      r.cargoKg -= unload;
+      p.storageKg += unload;
+      p.totalCollectedKg += unload;
+      events.push(`base_delivery:${unload}`);
+    }
+  }
+
+  // Battery state computation
+  const prevBatteryState = ms.batteryState;
+  const retCost = returnEnergyRequired(r, base.x, base.y);
+  const batteryRatio = r.battery / (retCost || 1);
+
+  if (r.battery <= 0) {
+    ms.batteryState = "battery_depleted";
+  } else if (batteryRatio <= 1.0) {
+    ms.batteryState = "critical_battery";
+  } else if (batteryRatio <= 1.3) {
+    ms.batteryState = "low_battery";
+    // Record reference on first low battery
+    if (prevBatteryState === "normal") {
+      ms.lowBatteryRef = r.battery;
+      ms.lowBatteryDistanceRef = distToBase(r, base.x, base.y);
+    }
+  } else {
+    ms.batteryState = "normal";
+  }
+
+  // Critical deviation check (%10 rule)
+  if (ms.batteryState === "critical_battery" && ms.lowBatteryDistanceRef > 0) {
+    if (checkCriticalDeviation(r.x, r.y, base.x, base.y, ms.lowBatteryDistanceRef)) {
+      ms.cargoDropOffered = true;
+    }
+  }
+
+  p.robot = r;
+  return { demandActive: hasInput, events };
+}
+
+/** Create initial manual robot state */
+export function createManualRobotState(): ManualRobotState {
+  return {
+    input: { dx: 0, dy: 0 },
+    isMoving: false,
+    batteryState: "normal",
+    lowBatteryRef: 0,
+    lowBatteryDistanceRef: 0,
+    cargoDropOffered: false,
+    cargoDropped: false,
+    processingTransit: {
+      active: false,
+      kg: 0,
+      startedAt: 0,
+      completesAt: 0,
+      sessionId: undefined,
+      sliceIndex: 0,
+    },
+    totalDistanceTravelled: 0,
+  };
+}
+
+/** Drop cargo on the ground (critical battery option A) */
+export function dropCargo(
+  p: SimPlayer,
+  ms: ManualRobotState,
+): number {
+  const dropped = p.robot.cargoKg;
+  p.robot.cargoKg = 0;
+  ms.cargoDropped = true;
+  return dropped;
+}
+
+/** Purchase extra battery (critical battery option B) */
+export function purchaseExtraBattery(
+  p: SimPlayer,
+  extraBatteryCost: number,
+  extraBatteryAmount: number,
+): boolean {
+  if (p.toxBalance < extraBatteryCost) return false;
+  p.toxBalance -= extraBatteryCost;
+  p.robot.battery = Math.min(batteryCap(p), p.robot.battery + extraBatteryAmount);
+  return true;
+}
+
+/** Start processing transit (Storage → Processing Center, 1-minute timer) */
+export function startProcessingTransit(
+  p: SimPlayer,
+  ms: ManualRobotState,
+  nowMs: number,
+): boolean {
+  if (ms.processingTransit.active) return false;
+  if (p.storageKg <= 0) return false;
+
+  const kg = p.storageKg;
+  p.storageKg = 0;
+  ms.processingTransit = {
+    active: true,
+    kg,
+    startedAt: nowMs,
+    completesAt: nowMs + 60_000, // 1 minute
+    sessionId: `${p.id}:transit:${nowMs}`,
+    sliceIndex: 0,
+  };
+  return true;
+}
+
+/** Complete processing transit (call when timer expires) */
+export function completeProcessingTransit(
+  p: SimPlayer,
+  ms: ManualRobotState,
+  world: SimWorld,
+  ledger: Array<{ playerId: string | number; key: string; kind: string; kg: number; tox: number }>,
+  nowMs: number,
+): boolean {
+  const pt = ms.processingTransit;
+  if (!pt.active) return false;
+  if (nowMs < pt.completesAt) return false;
+
+  // Process the burn
+  const burnKg = pt.kg;
+  const tox = (burnKg / 1000) * TOX_PER_TON; // Normal burn rate
+
+  // Check idempotency
+  const existing = ledger.find((l) => l.key === pt.sessionId);
+  if (existing) {
+    // Already processed, just clean up
+    ms.processingTransit = {
+      active: false,
+      kg: 0,
+      startedAt: 0,
+      completesAt: 0,
+      sessionId: undefined,
+      sliceIndex: 0,
+    };
+    return false;
+  }
+
+  // Record in ledger
+  ledger.push({
+    playerId: p.id,
+    key: pt.sessionId ?? `${p.id}:${nowMs}`,
+    kind: "processing_burn",
+    kg: burnKg,
+    tox,
+  });
+
+  p.toxBalance += tox;
+  p.totalBurnedKg += burnKg;
+  p.toxFromNormal += tox;
+  world.pollutionKg = Math.max(0, world.pollutionKg - burnKg);
+  world.burnedKg += burnKg;
+
+  ms.processingTransit = {
+    active: false,
+    kg: 0,
+    startedAt: 0,
+    completesAt: 0,
+    sessionId: undefined,
+    sliceIndex: 0,
+  };
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
