@@ -21,7 +21,7 @@
 //
 // Run:  bun test tests/storageBatteryValidation.test.ts
 
-import { describe, expect, test } from "bun:test";
+import { describe, it as test, expect } from "vitest";
 import { UPGRADES, WORLD } from "../src/convex/gameParams";
 import {
   makePlayer,

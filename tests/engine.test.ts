@@ -7,7 +7,7 @@
 //
 // Run:  bun test tests/engine.test.ts
 
-import { describe, expect, test } from "bun:test";
+import { describe, it as test, expect } from "vitest";
 import {
   batchAllocation,
   checkWasteInvariant,

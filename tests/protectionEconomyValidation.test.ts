@@ -12,7 +12,7 @@
 //
 // Run:  bun test tests/protectionEconomyValidation.test.ts
 
-import { describe, expect, test } from "bun:test";
+import { describe, it as test, expect } from "vitest";
 import {
   afkDue,
   applyIdleCheck,

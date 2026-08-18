@@ -4,7 +4,7 @@
 //
 // Run:  bun test tests/economy.test.ts
 
-import { describe, expect, test } from "bun:test";
+import { describe, it as test, expect } from "vitest";
 import {
   advanceBurn,
   applyBurnToPollution,

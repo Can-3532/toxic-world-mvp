@@ -20,7 +20,7 @@
 //
 // Run:  bun test tests/economyValidation.test.ts
 
-import { describe, expect, test } from "bun:test";
+import { describe, it as test, expect } from "vitest";
 import { replenishmentModelC } from "../src/convex/engine";
 import {
   BURN_ZONE_MULTIPLIER,
