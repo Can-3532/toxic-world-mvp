@@ -39,23 +39,28 @@ describe("waste invariant (two layers)", () => {
       burnedKg: 500,
       hiddenKg: 4_449_630,
       collectableKg: 494_170,
-      clusterKg: 56_200,
+      clusterKg: 55_700,
       cargoKg: 0,
       storageKg: 0,
       processingKg: 0,
     });
     expect(r.massBalance).toBeCloseTo(0, 6);
+    // Layer 2: holdings must equal pollution − generated (4,999,500 here)
     expect(r.poolBalance).toBeCloseTo(0, 6);
   });
 
   test("the same kg in two buckets (cluster + cargo) is detected as double-count", () => {
+    // The same physical 100 kg appears in BOTH cluster and cargo, so the
+    // recorded holdings (hidden + collectable = 4,999,900, + 200 in the two
+    // buckets = 5,000,100) exceed the atmosphere (5,000,000) by exactly the
+    // double-counted 100 kg.
     const r = checkWasteInvariant({
       initialWasteKg: 5_000_000,
       generatedKg: 0,
       pollutionKg: 5_000_000,
       burnedKg: 0,
       hiddenKg: 4_500_000,
-      collectableKg: 500_000,
+      collectableKg: 499_900,
       clusterKg: 100, // <- also counted in cargo below
       cargoKg: 100,
       storageKg: 0,
@@ -85,8 +90,11 @@ describe("Model C replenishment", () => {
     expect(replenishmentModelC(100, 40)).toBeCloseTo(0.05, 9);
     // ratio 0 → floor
     expect(replenishmentModelC(100, 0)).toBeCloseTo(0.05, 9);
-    // no generation → 0 (nothing to ratio against)
-    expect(replenishmentModelC(0, 42)).toBe(0);
+    // no generation: the freeze formula is clip(0.05×ratio, 0.05, 0.09), and
+    // the engine defines ratio = 0 when gen = 0, so the floor still applies
+    // (0.05). This case is unreachable in production anyway: demand comes from
+    // active robots, which require bases, which generate.
+    expect(replenishmentModelC(0, 42)).toBeCloseTo(0.05, 9);
   });
 
   test("typical starter ratios sit at the 5% floor (frozen Sprint 2.9 behavior)", () => {
@@ -221,13 +229,16 @@ describe("whole-world oracle (mirrors world.ts runTick)", () => {
     const s = freshWorld(10_000_000);
     const p = makePlayer("p1", { hasBase: true, baseX: 500, baseY: 500 }, 0);
     s.players.push(p);
-    // seed a burn queue so the burn path runs
+    // seed a burn queue so the burn path runs — the queued kg is REAL pool
+    // mass, so it must be debited from the collectable pool (mirrors
+    // harness:seedLoad) or Layer 2 reads it as phantom drift.
     s.players[0].processing = {
       queuedKg: 1000,
       since: 0,
       sessionId: "p1:0",
       sliceIndex: 0,
     };
+    s.world.collectableKg = Math.max(0, s.world.collectableKg - 1000);
     const { state, mass, pool } = runTicks(s, 60);
     expect(mass).toBeCloseTo(0, 6);
     expect(pool).toBeCloseTo(0, 6);
@@ -258,19 +269,28 @@ describe("whole-world oracle (mirrors world.ts runTick)", () => {
   test("WORLD COLLAPSE: 99.999% → 100% transition freezes the old cycle and resets", () => {
     const s = freshWorld(10_000_000, 0.99999); // just below 100%
     s.players.push(makePlayer("p1", { hasBase: true, baseX: 500, baseY: 500 }, 0));
-    const { state, events } = runTicks(s, 2);
+    // one base generates 50 kg/game-h = 0.8333 kg/tick; from 9,999,900 kg the
+    // world crosses 100% on the ~120th tick. Drive until the transition so the
+    // post-collapse assertions run on the freshly-reset world (before any
+    // follow-up generation advances it again).
+    let now = s.world.lastTick;
+    const events: { type: string; message: string }[] = [];
+    for (let i = 0; i < 200 && s.world.worldId === 0; i++) {
+      now += WORLD.TICK_SECONDS * 1000;
+      events.push(...simTick(s, now, false).events);
+    }
     expect(events.some((e) => e.type === "collapse")).toBe(true);
-    expect(state.world.worldId).toBe(1); // reset to World 1
-    expect(state.world.status).toBe("safe");
+    expect(s.world.worldId).toBe(1); // reset to World 1
+    expect(s.world.status).toBe("safe");
     // reset seed: 22.5% × capacity, burned/generated re-anchored to 0
-    expect(state.world.pollutionKg).toBeCloseTo(10_000_000 * WORLD.RESET_POLLUTION_FRAC, 3);
-    expect(state.world.burnedKg).toBe(0);
-    expect(state.world.generatedKg).toBeCloseTo(0, 6);
-    // both invariant layers re-anchored to exactly 0 — verify on the returned
-    // state via follow-up ticks (which also re-run generation against the new seed)
-    const r2 = runTicks(state, 1);
-    expect(Math.abs(r2.mass)).toBeLessThan(1e-6);
-    expect(Math.abs(r2.pool)).toBeLessThan(1e-6);
+    expect(s.world.pollutionKg).toBeCloseTo(10_000_000 * WORLD.RESET_POLLUTION_FRAC, 3);
+    expect(s.world.burnedKg).toBe(0);
+    expect(s.world.generatedKg).toBeCloseTo(0, 6);
+    // both invariant layers re-anchored to exactly 0 — verify via follow-up
+    // ticks (which also re-run generation against the new seed)
+    const r2 = simTick(s, now + WORLD.TICK_SECONDS * 1000, false);
+    expect(Math.abs(r2.invariantMass)).toBeLessThan(1e-6);
+    expect(Math.abs(r2.invariantPool)).toBeLessThan(1e-6);
   });
 
   test("critical recovery: burn > generation drives pollution back below 90%", () => {
@@ -345,8 +365,13 @@ describe("whole-world oracle (mirrors world.ts runTick)", () => {
   test("robots collect into storage and storage is the AFK buffer (Sprint 2.10)", () => {
     const s = freshWorld(10_000_000, 0.5);
     s.players.push(makePlayer("p1", { hasBase: true, baseX: 500, baseY: 500 }, 0));
-    // place one cluster right at the base so the trip completes quickly
+    // place one cluster right at the base so the trip completes quickly.
+    // freshWorld already spawned clusters and deducted them from collectableKg;
+    // replacing the array without rebalancing leaves the seeded leftover as
+    // phantom pool mass, so move the removed kg back into the collectable pool.
+    const seededKg = s.clusters.reduce((a, c) => a + c.kg, 0);
     s.clusters = [{ id: "near", x: 506, y: 500, kg: 40 }];
+    s.world.collectableKg += seededKg - 40;
     const { state, pool } = runTicks(s, 6); // 30 real seconds
     const p = state.players[0];
     const collected = p.totalCollectedKg + p.robot.cargoKg; // storage + in-flight cargo

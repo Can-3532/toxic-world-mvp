@@ -23,6 +23,7 @@
 
 import {
   batchAllocation,
+  checkWasteInvariant,
   replenishmentModelC,
   robotDemands,
   worldStatus,
@@ -53,6 +54,20 @@ import {
 
 const TICK_GAME_H = WORLD.GAME_MINUTES_PER_TICK / 60;
 const DT_REAL = WORLD.TICK_SECONDS;
+
+// SPRINT 2.11 fix — unique cluster ids. The original `c${worldId}-${out.length}
+// -${i}` scheme starts `out.length` at 0 for EVERY spawn call (freshWorld and
+// each tick's fresh `spawned` array), so every batch generated the SAME ids.
+// The per-tick `Map` rebuild then dropped all but the last batch — ~11,850 kg
+// (one spawn batch) vanished from the pool every tick, which read as a large
+// Layer-2 drift in every whole-world scenario. Production uses real DB ids
+// (world.ts `ctx.db.insert("wasteClusters")`), so this was sim-only; a
+// monotonically increasing module counter restores uniqueness.
+let simClusterSeq = 0;
+function nextClusterId(worldId: number): string {
+  simClusterSeq += 1;
+  return `c${worldId}-${simClusterSeq}`;
+}
 
 export type SimRobotState =
   | "idle"
@@ -85,7 +100,10 @@ export interface SimPlayer {
   baseY: number;
   storageKg: number;
   totalCollectedKg: number;
+  totalBurnedKg: number;
   toxBalance: number;
+  toxFromNormal: number;
+  toxFromZone: number;
   solBalance: number;
   processing: {
     queuedKg: number;
@@ -179,7 +197,7 @@ function spawnClusters(
       remaining,
     );
     out.push({
-      id: `c${worldId}-${out.length}-${i}`,
+      id: nextClusterId(worldId),
       x: 100 + ((i * 211) % 800),
       y: 100 + ((i * 97) % 800),
       kg: size,
@@ -214,11 +232,12 @@ function resetRobotToBase(p: SimPlayer, now: number, battery: number): SimRobot 
 export function simTick(state: SimState, now: number, zoneActive = false): TickResult {
   const events: TickResult["events"] = [];
   const world = { ...state.world };
-  let players = state.players.map((p) => ({
-    ...p,
-    robot: { ...p.robot },
-    processing: { ...p.processing },
-  }));
+  // SPRINT 2.11 port fix — mutate the player docs IN PLACE (like world.ts,
+  // which reads the docs once and patches them). The original clone-per-tick
+  // approach left every caller-held player reference stale: the 2.8/2.10
+  // suites hold `p` and apply their queue policy to it between ticks, and
+  // with clones that policy operated on dead objects (zero TOX ever earned).
+  const players = state.players;
   const clusterMap = new Map(state.clusters.map((c) => [String(c.id), { ...c }]));
   const mutClusters = () => [...clusterMap.values()];
 
@@ -242,7 +261,7 @@ export function simTick(state: SimState, now: number, zoneActive = false): TickR
   );
   const criticalNow = world.pollutionKg / world.capacityKg >= WORLD.CRITICAL_FRAC;
   world.generatedKg = (world.generatedKg ?? 0) + genKgH * TICK_GAME_H;
-  const seedPollutionKg = world.seedPollutionKg ?? world.pollutionKg + world.burnedKg;
+  let seedPollutionKg = world.seedPollutionKg ?? world.pollutionKg + world.burnedKg;
 
   // 3) robots — batch/reservation plan (level-ordered floor access) then step.
   const batchAssignments = batchAllocation(
@@ -322,6 +341,12 @@ export function simTick(state: SimState, now: number, zoneActive = false): TickR
     if (!alreadyRewarded) {
       state.ledger.add(slice.key);
       p.toxBalance += slice.tox;
+      // Sprint 2.11 port: mirror the player-doc counters world.ts writes
+      // (totalBurnedKg / toxFromNormal / toxFromZone) so the 2.8/2.10 suites
+      // can decompose normal vs Burn Zone earnings.
+      p.totalBurnedKg += burnKg;
+      p.toxFromNormal += slice.kind === "normal" ? slice.tox : 0;
+      p.toxFromZone += slice.kind === "burn_zone" ? slice.tox : 0;
       pollutionKg = Math.max(0, pollutionKg - burnKg);
       burnedKg += burnKg;
       if (next.queuedKg === 0) {
@@ -432,6 +457,10 @@ export function simTick(state: SimState, now: number, zoneActive = false): TickR
   world.generationRateKgH = genKgH;
   world.demandKgH = demandKgH;
   world.status = status;
+  // SPRINT 2.11 fix — persist the new world id on collapse (world.ts patches
+  // `worldId: newWorldId` on the world doc; without this the sim's worldId
+  // stayed 0 forever, so collapse-detecting tests never saw worldId > 0).
+  world.worldId = newWorldId;
   world.resetCount =
     state.world.resetCount + (newWorldId > state.world.worldId ? 1 : 0);
   world.lastTick = now;
@@ -641,9 +670,9 @@ export function makePlayer(
   opts: Partial<SimPlayer> & { hasBase: boolean },
   now = 0,
 ): SimPlayer {
-  const bx = opts.baseX ?? 500;
-  const by = opts.baseY ?? 500;
   const { auto, hasBase, baseX, baseY, robot, ...rest } = opts;
+  const bx = baseX ?? 500;
+  const by = baseY ?? 500;
   return {
     id,
     hasBase,
@@ -651,7 +680,10 @@ export function makePlayer(
     baseY: by,
     storageKg: 0,
     totalCollectedKg: 0,
+    totalBurnedKg: 0,
     toxBalance: 0,
+    toxFromNormal: 0,
+    toxFromZone: 0,
     solBalance: 0,
     processing: { queuedKg: 0, since: now, sessionId: undefined, sliceIndex: 0 },
     levels: { cargo: 1, recharge: 1, battery: 1, storage: 1 },
@@ -673,6 +705,115 @@ export function makePlayer(
       },
     ...rest,
   };
+}
+
+/**
+ * Create a sim state seeded with the given players, debiting any held mass
+ * (storage / queue / cargo) from the world's collectable pool — mirrors
+ * `harness:seedLoad` (Sprint 2.6): seeded holdings are REAL recoverable pool
+ * mass, and without the debit Layer 2 reads them as phantom drift.
+ */
+export function simWithPlayers(players: SimPlayer[]): SimState {
+  const s = freshWorld();
+  const heldKg = players.reduce(
+    (a, p) => a + p.storageKg + p.processing.queuedKg + p.robot.cargoKg,
+    0,
+  );
+  if (heldKg > 0) {
+    s.world.collectableKg = Math.max(0, s.world.collectableKg - heldKg);
+  }
+  s.players.push(...players);
+  return s;
+}
+
+/**
+ * Deterministic synthetic players (mirrors `harness:seedLoad` shapes, no RNG):
+ * level pool 50% L1 / ~33% L2-3 / ~17% L5, striped positions and holdings.
+ * `seed` is accepted for call-compat with the Sprint 2.8/2.10 suites and only
+ * shifts the striping; the result is fully deterministic either way.
+ */
+export function makePlayers(
+  count: number,
+  opts: {
+    seed?: number;
+    autoFraction?: number;
+    storageFraction?: number;
+    queueFraction?: number;
+    levelPool?: number[];
+  } = {},
+): SimPlayer[] {
+  const autoFraction = opts.autoFraction ?? 0.5;
+  const storageFraction = opts.storageFraction ?? 0.3;
+  const queueFraction = opts.queueFraction ?? 0.2;
+  const levelPool = opts.levelPool ?? [1, 1, 1, 2, 3, 5];
+  const off = opts.seed ?? 0;
+  const now = 0;
+  const out: SimPlayer[] = [];
+  for (let i = 0; i < count; i++) {
+    const lv = levelPool[(i * 7 + off) % levelPool.length];
+    const bx = 120 + ((i * 211 + off * 13) % (WORLD.MAP_SIZE - 240));
+    const by = 120 + ((i * 97 + off * 29) % (WORLD.MAP_SIZE - 240));
+    const storageKg =
+      (i + off) % 10 < storageFraction * 10
+        ? Math.floor(((i * 29 + off) % UPGRADES.storage.caps[lv - 1]) + 1)
+        : 0;
+    const queuedKg =
+      (i * 3 + off) % 10 < queueFraction * 10
+        ? 10 + ((i * 31 + off) % 40)
+        : 0;
+    out.push(
+      makePlayer(i, {
+        hasBase: true,
+        baseX: bx,
+        baseY: by,
+        storageKg,
+        processing: {
+          queuedKg,
+          since: now,
+          sessionId: undefined,
+          sliceIndex: 0,
+        },
+        levels: { cargo: lv, recharge: lv, battery: lv, storage: lv },
+        auto: (i + off) % 10 < autoFraction * 10,
+        robot: {
+          state: "idle",
+          x: bx,
+          y: by,
+          fromX: bx,
+          fromY: by,
+          departAt: 0,
+          targetClusterId: null,
+          battery: UPGRADES.battery.caps[lv - 1],
+          cargoKg: 0,
+          auto: (i + off) % 10 < autoFraction * 10,
+          totalTrips: 0,
+        },
+      }, now),
+    );
+  }
+  return out;
+}
+
+/**
+ * Compute the two-layer invariant residuals for a sim state (re-uses the
+ * production checkWasteInvariant — the same math simTick asserts internally).
+ */
+export function simInvariant(state: SimState): {
+  massBalance: number;
+  poolBalance: number;
+} {
+  return checkWasteInvariant({
+    initialWasteKg: state.world.seedPollutionKg,
+    generatedKg: state.world.generatedKg,
+    pollutionKg: state.world.pollutionKg,
+    burnedKg: state.world.burnedKg,
+    hiddenKg: state.world.hiddenKg,
+    collectableKg: state.world.collectableKg,
+    clusterKg: state.clusters.reduce((a, c) => a + c.kg, 0),
+    cargoKg: state.players.reduce((a, p) => a + p.robot.cargoKg, 0),
+    storageKg: state.players.reduce((a, p) => a + p.storageKg, 0),
+    processingKg: state.players.reduce((a, p) => a + p.processing.queuedKg, 0),
+  });
 }
 
 /** Advance the sim a fixed number of 5 s ticks and return the final state. */

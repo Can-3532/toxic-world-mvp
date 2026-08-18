@@ -9,6 +9,15 @@
 //   GAME TIME  (1 tick = 1 game minute) : generation, pollution, replenishment,
 //                                          demand (kg per game hour)
 //
+// SPRINT 2.11 port: engineSim.ts was rewritten to a functional, deterministic
+// API (simTick/simWithPlayers/simInvariant) that mirrors world.ts step-for-
+// step. This suite was migrated to that API. The Burn Zone is driven by a
+// deterministic schedule (active 4 ticks of every 16-tick cycle = 20 s active
+// per 80 s, inside the frozen 15–30 s / 45–90 s design window) instead of the
+// old seeded RNG, so the frozen 500 TOX/t row was RE-MEASURED: L2 1.88 game-h,
+// L5 15.32 game-h, 1,919.5 TOX/game-day (was 1.63 / 13.32 / 2,206.7 under the
+// old random-zone sim). The measured-rate derivations are otherwise unchanged.
+//
 // Run:  bun test tests/economyValidation.test.ts
 
 import { describe, expect, test } from "bun:test";
@@ -20,12 +29,24 @@ import {
   UPGRADES,
   WORLD,
 } from "../src/convex/gameParams";
-import { Sim, makePlayer, makePlayers } from "./engineSim";
+import {
+  makePlayer,
+  makePlayers,
+  simInvariant,
+  simTick,
+  simWithPlayers,
+  type SimPlayer,
+  type SimState,
+} from "./engineSim";
 
 const EPS = 1e-6;
 // 1 real hour = 3600 real s = 3600/5 = 720 ticks × 1 game-min = 12 game hours
 const GAME_HOURS_PER_REAL_HOUR =
   ((3600 / WORLD.TICK_SECONDS) * WORLD.GAME_MINUTES_PER_TICK) / 60;
+
+/** Deterministic Burn Zone schedule — design window 15–30 s active / 45–90 s
+ * cooldown. Active 4 ticks (20 s) of every 16-tick (80 s) cycle (25%). */
+const zoneActiveAt = (t: number) => t % 16 < 4;
 
 function fmt(n: number): string {
   return Number.isFinite(n) ? n.toFixed(2) : "∞";
@@ -66,28 +87,27 @@ describe("1. time axes (formal separation)", () => {
 describe("2. starter benchmarks (24 game-h sim, both axes)", () => {
   // a diligent starter: every kg that lands in storage is queued for burning
   // (mirrors the queueProcessing player action)
-  function runStarter(gameHours: number): { sim: Sim; p: ReturnType<typeof makePlayer> } {
-    const p = makePlayer("starter", { base: true, level: 1, x: 500, y: 500, auto: true });
-    const sim = new Sim({ players: [p], seed: 42 });
-    sim.zone.nextSpawnAt = 1_000_000; // let the zone lifecycle run immediately
+  function runStarter(gameHours: number): { state: SimState; p: SimPlayer } {
+    const p = makePlayer("starter", { hasBase: true, baseX: 500, baseY: 500, auto: true });
+    const state = simWithPlayers([p]);
     const ticks = Math.round((gameHours * 60) / WORLD.GAME_MINUTES_PER_TICK);
     for (let t = 0; t < ticks; t++) {
-      sim.tick(1_000_000 + t * WORLD.TICK_SECONDS * 1000);
+      simTick(state, 1_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
       if (p.storageKg > 0) {
         // player action: queueProcessing
         p.processing.queuedKg += p.storageKg;
         if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
         p.storageKg = 0;
       }
-      const inv = sim.invariant();
+      const inv = simInvariant(state);
       expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
       expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
     }
-    return { sim, p };
+    return { state, p };
   }
 
   test("emergent starter throughput + TOX rates (both axes)", () => {
-    const { sim, p } = runStarter(24);
+    const { p } = runStarter(24);
     const gameHours = 24;
 
     const collectedGph = p.totalCollectedKg / gameHours;
@@ -122,8 +142,6 @@ describe("2. starter benchmarks (24 game-h sim, both axes)", () => {
       + ` | L5 ${fmt(times[3].gameH)} game-h (${fmt(times[3].realH)} real-h)`);
 
     // the upgrade times are DERIVED from the measured rate — self-consistency
-    // (the old 7.8/19.6/37.3/63.9 game-h targets were based on the design's
-    // assumed 38.34 kg/h reference; the sim measures ~174 kg/game-h, see log)
     for (let i = 0; i < times.length; i++) {
       expect(times[i].gameH * toxGph).toBeCloseTo(CARGO_CUMULATIVE_TOX[i], 9);
       expect(times[i].realH * GAME_HOURS_PER_REAL_HOUR).toBeCloseTo(times[i].gameH, 9);
@@ -140,8 +158,8 @@ describe("2. starter benchmarks (24 game-h sim, both axes)", () => {
   });
 
   test("storage dynamics: fill time, unload cadence, processing backlog", () => {
-    const p = makePlayer("starter", { base: true, level: 1, x: 500, y: 500, auto: true });
-    const sim = new Sim({ players: [p], seed: 42 });
+    const p = makePlayer("starter", { hasBase: true, baseX: 500, baseY: 500, auto: true });
+    const state = simWithPlayers([p]);
     // measure over 12 game hours (one real hour)
     const ticks = 12 * 60;
     const storageCap = 60; // L1
@@ -149,7 +167,7 @@ describe("2. starter benchmarks (24 game-h sim, both axes)", () => {
     let unloads = 0;
     let maxBacklog = 0;
     for (let t = 0; t < ticks; t++) {
-      sim.tick(2_000_000 + t * WORLD.TICK_SECONDS * 1000);
+      simTick(state, 2_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
       if (p.storageKg > 0) {
         p.processing.queuedKg += p.storageKg;
         if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
@@ -180,43 +198,38 @@ describe("2. starter benchmarks (24 game-h sim, both axes)", () => {
 
 describe("3. burn zone under the 5 s tick", () => {
   test("lifecycle statistics over 24 game-h (2 real-h)", () => {
-    const p = makePlayer("starter", { base: true, level: 1, x: 500, y: 500, auto: true });
-    const sim = new Sim({ players: [p], seed: 7 });
-    sim.zone.nextSpawnAt = 1_000_000;
-    let spawns = 0;
-    let activeMs = 0;
-    let prevStatus: "active" | "inactive" = "inactive";
-    let activeStart = 0;
+    // deterministic schedule statistics (the sim's zoneActive is caller-driven)
     const ticks = 24 * 60;
+    let spawns = 0;
+    let prevActive = false;
+    let activeMs = 0;
     for (let t = 0; t < ticks; t++) {
-      const now = 3_000_000 + t * WORLD.TICK_SECONDS * 1000;
-      sim.tick(now);
+      const active = zoneActiveAt(t);
+      if (active && !prevActive) spawns += 1;
+      if (active) activeMs += WORLD.TICK_SECONDS * 1000;
+      prevActive = active;
+    }
+    const totalMs = ticks * WORLD.TICK_SECONDS * 1000;
+    const activeFrac = activeMs / totalMs;
+
+    // starter encounter: share of burned TOX earned inside active windows
+    const p = makePlayer("starter", { hasBase: true, baseX: 500, baseY: 500, auto: true });
+    const state = simWithPlayers([p]);
+    for (let t = 0; t < ticks; t++) {
+      simTick(state, 3_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
       if (p.storageKg > 0) {
         p.processing.queuedKg += p.storageKg;
         if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
         p.storageKg = 0;
       }
-      const z = sim.zone;
-      if (z.status === "active" && prevStatus === "inactive") {
-        spawns += 1;
-        activeStart = now;
-      }
-      if (z.status === "active") activeMs += WORLD.TICK_SECONDS * 1000;
-      if (z.status === "inactive" && prevStatus === "active") {
-        activeMs += 0; // accounted on active ticks
-      }
-      prevStatus = z.status;
-      void activeStart;
     }
-    const totalMs = ticks * WORLD.TICK_SECONDS * 1000;
-    const activeFrac = activeMs / totalMs;
     const encounterByTox =
       p.toxFromZone > 0
         ? p.toxFromZone / (p.toxFromNormal + p.toxFromZone)
         : 0;
     console.log("── BURN ZONE (24 game-h / 2 real-h) ────────────────────────────");
     console.log(`  spawns           : ${spawns} (avg interval ${fmt(totalMs / spawns / 1000)} s real)`);
-    console.log(`  active duration  : ${fmt(activeMs / 1000)} s real total (${fmt(activeFrac * 100,)}% of real time)`);
+    console.log(`  active duration  : ${fmt(activeMs / 1000)} s real total (${fmt(activeFrac * 100)}% of real time)`);
     console.log(`  starter encounter: ${fmt(encounterByTox * 100)}% of burned TOX earned inside a zone`);
     // design: active 15–30 s, cooldown 45–90 s ⇒ active fraction ≈ 0.18–0.4
     expect(spawns).toBeGreaterThan(10);
@@ -232,11 +245,11 @@ describe("3. burn zone under the 5 s tick", () => {
 describe("4. Model C with the 5 s tick", () => {
   test("replenishment frac stays in clip(0.05×ratio, 5%, 9%) every tick", () => {
     const players = makePlayers(1000, { seed: 11, autoFraction: 0.5 });
-    const sim = new Sim({ players, seed: 11 });
-    let prevHidden = sim.world.hiddenKg;
+    const state = simWithPlayers(players);
+    let prevHidden = state.world.hiddenKg;
     for (let t = 0; t < 20; t++) {
-      sim.tick(4_000_000 + t * WORLD.TICK_SECONDS * 1000);
-      const w = sim.world;
+      simTick(state, 4_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
+      const w = state.world;
       const ratio = w.generationRateKgH > 0 ? w.demandKgH / w.generationRateKgH : 0;
       const frac = replenishmentModelC(w.generationRateKgH, w.demandKgH);
       expect(frac).toBeGreaterThanOrEqual(0.05 - EPS);
@@ -248,19 +261,28 @@ describe("4. Model C with the 5 s tick", () => {
       // replenishment only moves hidden → collectable: hidden never increases
       expect(w.hiddenKg).toBeLessThanOrEqual(prevHidden + EPS);
       prevHidden = w.hiddenKg;
-      const inv = sim.invariant();
+      const inv = simInvariant(state);
       expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
       expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
     }
   });
   test("75% vs 50% activity preserves the demand/generation ordering", () => {
+    // A single-tick demand snapshot is noisy (robots phase in and out of
+    // transit against a saturated cluster pool), so average demand over a
+    // 20-tick window after a 20-tick warmup. Averaged, the ordering is robust.
     const ratios: Record<string, number> = {};
     for (const frac of [0.75, 0.5]) {
       const players = makePlayers(1000, { seed: 13, autoFraction: frac });
-      const sim = new Sim({ players, seed: 13 });
-      for (let t = 0; t < 10; t++) sim.tick(5_000_000 + t * WORLD.TICK_SECONDS * 1000);
-      const w = sim.world;
-      ratios[String(frac)] = w.generationRateKgH > 0 ? w.demandKgH / w.generationRateKgH : 0;
+      const state = simWithPlayers(players);
+      const window = 20;
+      let demandSum = 0;
+      for (let t = 0; t < 40; t++) {
+        simTick(state, 5_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
+        if (t >= 20) demandSum += state.world.demandKgH;
+      }
+      const w = state.world;
+      const avgDemand = demandSum / window;
+      ratios[String(frac)] = w.generationRateKgH > 0 ? avgDemand / w.generationRateKgH : 0;
     }
     expect(ratios["0.75"]).toBeGreaterThan(ratios["0.5"]);
   });
@@ -287,25 +309,24 @@ describe("5. pollution scenarios under the 5 s tick", () => {
         queueFraction: 0.05,
         levelPool: sc.pool,
       });
-      const sim = new Sim({ players, seed: sc.n });
-      const p0 = sim.world.pollutionKg;
+      const state = simWithPlayers(players);
+      const p0 = state.world.pollutionKg;
       const ticks = 60; // 1 game hour
       for (let t = 0; t < ticks; t++) {
-        sim.tick(6_000_000 + t * WORLD.TICK_SECONDS * 1000);
-        const inv = sim.invariant();
+        simTick(state, 6_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
+        const inv = simInvariant(state);
         expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
         expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
       }
-      const dPoll = sim.world.pollutionKg - p0; // kg per game hour
-      const genPerGameH = sim.world.generationRateKgH; // kg per game hour
-      const burnPerGameH = dPoll - genPerGameH < 0 ? genPerGameH - dPoll : 0; // crude
+      const dPoll = state.world.pollutionKg - p0; // kg per game hour
+      const genPerGameH = state.world.generationRateKgH; // kg per game hour
       const netRate = dPoll; // kg/game-h
       const collapseGameH = netRate > 0 ? (WORLD.CAPACITY_KG - p0) / netRate : Infinity;
       console.log(`── POLLUTION ${sc.name} ──────────────────────────────────────────`);
       console.log(`  gen ${fmt(genPerGameH)} kg/game-h | dPoll ${fmt(netRate)} kg/game-h`
         + ` | burn ~${fmt(Math.max(0, genPerGameH - netRate))} kg/game-h`
         + ` | collapse ≈ ${fmt(collapseGameH)} game-h (${fmt(collapseGameH / GAME_HOURS_PER_REAL_HOUR)} real-h)`
-        + ` | pollution ${fmt((sim.world.pollutionKg / WORLD.CAPACITY_KG) * 100)}%`);
+        + ` | pollution ${fmt((state.world.pollutionKg / WORLD.CAPACITY_KG) * 100)}%`);
     });
   }
 });
@@ -316,36 +337,30 @@ describe("5. pollution scenarios under the 5 s tick", () => {
 // Collection/burn KG rates are TOX-independent, so ONE starter run is scaled
 // linearly; only the TOX-derived quantities change with TOX_PER_TON.
 
-function starterRun(gameHours: number): {
-  p: ReturnType<typeof makePlayer>;
-  sim: Sim;
-} {
-  const p = makePlayer("starter", { base: true, level: 1, x: 500, y: 500, auto: true });
-  const sim = new Sim({ players: [p], seed: 42 });
-  sim.zone.nextSpawnAt = 1_000_000;
-  // start time MUST match the Sprint 2.8 starter baseline (1_000_000) — the
-  // zone lifecycle draws rng on the spawn tick, shifting cluster layouts
+function starterRun(gameHours: number): { p: SimPlayer; state: SimState } {
+  const p = makePlayer("starter", { hasBase: true, baseX: 500, baseY: 500, auto: true });
+  const state = simWithPlayers([p]);
   const ticks = Math.round((gameHours * 60) / WORLD.GAME_MINUTES_PER_TICK);
   for (let t = 0; t < ticks; t++) {
-    sim.tick(1_000_000 + t * WORLD.TICK_SECONDS * 1000);
+    simTick(state, 1_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
     if (p.storageKg > 0) {
       p.processing.queuedKg += p.storageKg;
       if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
       p.storageKg = 0;
     }
   }
-  return { p, sim };
+  return { p, state };
 }
 
 describe("2.9 decision 2 — TOX/ton sensitivity", () => {
   test("250 / 350 / 500 / 650 TOX/t: first upgrade, L5, daily TOX, zone, sink ratio", () => {
-    const { p, sim } = starterRun(24);
+    const { p, state } = starterRun(24);
     const burnedKgPerGameH = p.totalBurnedKg / 24;
     const zoneFrac =
       p.toxFromZone / (p.toxFromNormal + p.toxFromZone);
     // Recover the NORMAL vs ZONE kg split from the measured TOX buckets at the
     // current rate (zone burns credit ×BURN_ZONE_MULTIPLIER). Scaling total kg
-    // flat would miss the ×1.2 zone multiplier and drift from the 2.8 baseline.
+    // flat would miss the ×1.2 zone multiplier.
     const normalKgGph = (p.toxFromNormal * 1000) / TOX_PER_TON / 24;
     const zoneKgGph =
       (p.toxFromZone * 1000) / (TOX_PER_TON * BURN_ZONE_MULTIPLIER) / 24;
@@ -354,7 +369,7 @@ describe("2.9 decision 2 — TOX/ton sensitivity", () => {
     const totalSink = Object.values(UPGRADES).reduce(
       (s, u) => s + u.costs.reduce((a, b) => a + b, 0),
       0,
-    ); // cargo 1225 + recharge 160 + battery 1080 + storage 1780 = 4245
+    ); // 3,365 after the Sprint 2.10 storage/battery rebalance
     const l2Cost = CARGO_CUMULATIVE_TOX[0]; // 150
     const l5Cost = CARGO_CUMULATIVE_TOX[3]; // 1225
 
@@ -392,14 +407,17 @@ describe("2.9 decision 2 — TOX/ton sensitivity", () => {
     expect(rows[1].l2GameH).toBeGreaterThan(rows[2].l2GameH);
     expect(rows[2].l2GameH).toBeGreaterThan(rows[3].l2GameH);
     expect(rows[0].sinkRatio).toBeGreaterThan(rows[3].sinkRatio);
-    // frozen 500 TOX/t row must reproduce the Sprint 2.8 numbers (both axes)
-    expect(rows[2].l2GameH).toBeCloseTo(1.63, 1);
-    expect(rows[2].l5GameH).toBeCloseTo(13.32, 1);
-    expect(rows[2].dailyGame).toBeCloseTo(2206.7, 0);
-    expect(rows[2].dailyReal).toBeCloseTo(2206.7 * GAME_HOURS_PER_REAL_HOUR, 0);
+    // frozen 500 TOX/t row — RE-MEASURED on the Sprint 2.11 deterministic sim
+    // (was 1.63 / 13.32 / 2,206.7 under the old random-zone sim). The doc
+    // table TOXIC_WORLD_STARTER_ECONOMY_RECALIBRATION_v0.1.md §3 records the
+    // old measurements; these pins lock the CURRENT sim to its own baseline.
+    expect(rows[2].l2GameH).toBeCloseTo(1.88, 1);
+    expect(rows[2].l5GameH).toBeCloseTo(15.32, 1);
+    expect(rows[2].dailyGame).toBeCloseTo(1919.5, 0);
+    expect(rows[2].dailyReal).toBeCloseTo(1919.5 * GAME_HOURS_PER_REAL_HOUR, 0);
     // the 500 row reconstructs the measured TOX exactly (zone multiplier included)
     expect(rows[2].dailyGame).toBeCloseTo(p.toxBalance, 9);
-    const inv = sim.invariant();
+    const inv = simInvariant(state);
     expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
     expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
   });
@@ -414,8 +432,8 @@ describe("2.9 decision 2 — TOX/ton sensitivity", () => {
 // these are the LOWER bounds on collapse times (upper bound = 2.8 no-queue
 // numbers).
 
-function autoQueueAll(sim: Sim): void {
-  for (const p of sim.players) {
+function autoQueueAll(state: SimState): void {
+  for (const p of state.players) {
     if (p.storageKg > 0) {
       p.processing.queuedKg += p.storageKg;
       if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:q`;
@@ -441,20 +459,20 @@ describe("2.9 decision 3 — world collapse tempo", () => {
           storageFraction: 0.1,
           queueFraction: 0,
         });
-        const sim = new Sim({ players, seed });
+        const state = simWithPlayers(players);
         // warmup 30 ticks (0.5 game-h), measure the next 30 (0.5 game-h)
         let p30 = 0;
         for (let t = 0; t < 60; t++) {
-          sim.tick(10_000_000 + t * WORLD.TICK_SECONDS * 1000);
-          autoQueueAll(sim);
-          if (t === 29) p30 = sim.world.pollutionKg;
+          simTick(state, 10_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
+          autoQueueAll(state);
+          if (t === 29) p30 = state.world.pollutionKg;
           if (t >= 30) {
-            const inv = sim.invariant();
+            const inv = simInvariant(state);
             expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
             expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
           }
         }
-        const netPerGameH = (sim.world.pollutionKg - p30) * 2; // per 0.5 game-h
+        const netPerGameH = (state.world.pollutionKg - p30) * 2; // per 0.5 game-h
         const pStart = p30;
         const to90 =
           netPerGameH > 0
@@ -470,11 +488,11 @@ describe("2.9 decision 3 — world collapse tempo", () => {
         console.log(
           `── COLLAPSE ${cfg.n} players, ${Math.round(active * 100)}% active ──`
             + ` collected ${fmt(collectedPerGameH)} kg/game-h`
-            + ` | gen ${fmt(sim.world.generationRateKgH)} kg/game-h`
+            + ` | gen ${fmt(state.world.generationRateKgH)} kg/game-h`
             + ` | net ${fmt(netPerGameH)} kg/game-h`
             + ` | 50→90 ${fmt(to90)} game-h (${fmt(to90 / GAME_HOURS_PER_REAL_HOUR)} real-h)`
             + ` | 90→100 ${fmt(to100)} game-h (${fmt(to100 / GAME_HOURS_PER_REAL_HOUR)} real-h)`
-            + ` | pollution now ${fmt((sim.world.pollutionKg / WORLD.CAPACITY_KG) * 100)}%`,
+            + ` | pollution now ${fmt((state.world.pollutionKg / WORLD.CAPACITY_KG) * 100)}%`,
         );
       });
     }

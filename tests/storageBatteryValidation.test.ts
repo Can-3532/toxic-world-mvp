@@ -12,11 +12,25 @@
 // cost curves chosen from those measurements (gameParams.ts UPGRADES).
 // Rebalance doc: TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md.
 //
+// SPRINT 2.11 port: engineSim.ts was rewritten to a functional, deterministic
+// API (simTick/simWithPlayers/simInvariant) that mirrors world.ts step-for-
+// step. This suite was migrated to that API; the assertions (relative metrics
+// + frozen cost curves) are unchanged. The Burn Zone is driven by a
+// deterministic schedule (active 4 ticks of every 16-tick cycle = 20 s active
+// per 80 s, inside the frozen 15–30 s / 45–90 s design window).
+//
 // Run:  bun test tests/storageBatteryValidation.test.ts
 
 import { describe, expect, test } from "bun:test";
 import { UPGRADES, WORLD } from "../src/convex/gameParams";
-import { Sim, makePlayer, type SimPlayer } from "./engineSim";
+import {
+  makePlayer,
+  simInvariant,
+  simTick,
+  simWithPlayers,
+  type SimPlayer,
+  type SimState,
+} from "./engineSim";
 
 const EPS = 1e-6;
 const GAME_HOURS_PER_REAL_HOUR =
@@ -26,13 +40,17 @@ function fmt(n: number): string {
   return Number.isFinite(n) ? n.toFixed(2) : "∞";
 }
 
+/** Deterministic Burn Zone schedule — design window 15–30 s active / 45–90 s
+ * cooldown. Active 4 ticks (20 s) of every 16-tick (80 s) cycle (25%). */
+const zoneActiveAt = (t: number) => t % 16 < 4;
+
 // ---------------------------------------------------------------------------
 // runner: one starter, one axis swept, deterministic per seed
 // ---------------------------------------------------------------------------
 
 interface AxisRun {
   p: SimPlayer;
-  sim: Sim;
+  state: SimState;
   /** ticks the robot spent recharging (battery/recharge axes) */
   rechargeTicks: number;
   /** ticks the robot sat idle with a full cargo (storage-pressure stall) */
@@ -52,19 +70,15 @@ interface AxisRun {
  *    a player who checks in once per 5 real minutes). Under this policy the
  *    storage cap is the ONLY thing that decides how long the robot can work
  *    between check-ins, so it isolates storage's buffer value.
- * Seed 42 reproduces the Sprint 2.9 frozen starter baseline (2,206.7 TOX /
- * game-day at 500 TOX/t) so the ROI rows in this suite line up with the
- * freeze doc.
  */
 function runAxis(opts: {
   batteryLevel?: number;
   storageLevel?: number;
   queue: "diligent" | "hourly";
   gameHours?: number;
-  seed?: number;
 }): AxisRun {
   const gameHours = opts.gameHours ?? 24;
-  const p = makePlayer("s", { base: true, level: 1, x: 500, y: 500, auto: true });
+  const p = makePlayer("s", { hasBase: true, baseX: 500, baseY: 500, auto: true });
   if (opts.batteryLevel) {
     p.levels.battery = opts.batteryLevel;
     p.robot.battery = UPGRADES.battery.caps[opts.batteryLevel - 1];
@@ -72,15 +86,14 @@ function runAxis(opts: {
   if (opts.storageLevel) {
     p.levels.storage = opts.storageLevel;
   }
-  const sim = new Sim({ players: [p], seed: opts.seed ?? 42 });
-  sim.zone.nextSpawnAt = 1_000_000; // zone lifecycle runs from tick 0
+  const state = simWithPlayers([p]);
   const ticks = Math.round((gameHours * 60) / WORLD.GAME_MINUTES_PER_TICK);
   let rechargeTicks = 0;
   let stallTicks = 0;
   let maxStorageKg = 0;
   let maxQueueKg = 0;
   for (let t = 0; t < ticks; t++) {
-    sim.tick(1_000_000 + t * WORLD.TICK_SECONDS * 1000);
+    simTick(state, 1_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
     // queue policy (player action: queueProcessing)
     if (p.storageKg > 0) {
       const due =
@@ -96,11 +109,11 @@ function runAxis(opts: {
     if (p.robot.state === "idle" && p.robot.cargoKg > 0) stallTicks += 1;
     maxStorageKg = Math.max(maxStorageKg, p.storageKg);
     maxQueueKg = Math.max(maxQueueKg, p.processing.queuedKg);
-    const inv = sim.invariant();
+    const inv = simInvariant(state);
     expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
     expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
   }
-  return { p, sim, rechargeTicks, stallTicks, maxStorageKg, maxQueueKg };
+  return { p, state, rechargeTicks, stallTicks, maxStorageKg, maxQueueKg };
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +124,7 @@ describe("1. battery axis (diligent starter, 24 game-h)", () => {
   test("recharge share + throughput across battery L1..L5", () => {
     const rows: Record<string, number>[] = [];
     for (let lv = 1; lv <= 5; lv++) {
-      const { p, sim, rechargeTicks } = runAxis({ batteryLevel: lv, queue: "diligent" });
+      const { p, state, rechargeTicks } = runAxis({ batteryLevel: lv, queue: "diligent" });
       const gameH = 24;
       rows.push({
         lv,
@@ -119,7 +132,8 @@ describe("1. battery axis (diligent starter, 24 game-h)", () => {
         burnedGph: p.totalBurnedKg / gameH,
         toxGph: p.toxBalance / gameH,
       });
-      expect(Math.abs(sim.invariant().massBalance)).toBeLessThan(EPS);
+      const inv = simInvariant(state);
+      expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
     }
     console.log("── BATTERY AXIS (cargo/storage/recharge L1, diligent queue) ─────");
     console.log("  Lv | recharge % of real time | burned kg/game-h | TOX/game-h");
@@ -146,20 +160,19 @@ describe("1b. recharge axis — the rate, not the cap, is the dead-time killer",
   test("recharge share across recharge L1..L5 (battery L1, diligent)", () => {
     const rows: Record<string, number>[] = [];
     for (let lv = 1; lv <= 5; lv++) {
-      const p = makePlayer("s", { base: true, level: 1, x: 500, y: 500, auto: true });
+      const p = makePlayer("s", { hasBase: true, baseX: 500, baseY: 500, auto: true });
       p.levels.recharge = lv;
-      const sim = new Sim({ players: [p], seed: 42 });
-      sim.zone.nextSpawnAt = 1_000_000;
+      const state = simWithPlayers([p]);
       let rechargeTicks = 0;
       for (let t = 0; t < 24 * 60; t++) {
-        sim.tick(1_000_000 + t * WORLD.TICK_SECONDS * 1000);
+        simTick(state, 1_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
         if (p.storageKg > 0) {
           if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
           p.processing.queuedKg += p.storageKg;
           p.storageKg = 0;
         }
         if (p.robot.state === "recharging") rechargeTicks += 1;
-        const inv = sim.invariant();
+        const inv = simInvariant(state);
         expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
         expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
       }
@@ -198,7 +211,7 @@ describe("2. storage axis (hourly check-in, 24 game-h)", () => {
   test("stall share + throughput across storage L1..L5", () => {
     const rows: Record<string, number>[] = [];
     for (let lv = 1; lv <= 5; lv++) {
-      const { p, sim, stallTicks, maxStorageKg } = runAxis({
+      const { p, state, stallTicks, maxStorageKg } = runAxis({
         storageLevel: lv,
         queue: "hourly",
       });
@@ -210,7 +223,8 @@ describe("2. storage axis (hourly check-in, 24 game-h)", () => {
         collectedGph: p.totalCollectedKg / gameH,
         maxStorageKg,
       });
-      expect(Math.abs(sim.invariant().massBalance)).toBeLessThan(EPS);
+      const inv = simInvariant(state);
+      expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
     }
     console.log("── STORAGE AXIS (cargo/battery/recharge L1, queue once per game-h) ─");
     console.log("  Lv | stall % (full-hopper) | burned kg/game-h | collected kg/game-h");
@@ -238,18 +252,17 @@ describe("3. cargo axis reference (diligent starter, 24 game-h)", () => {
   test("throughput across cargo L1..L5", () => {
     const rows: Record<string, number>[] = [];
     for (let lv = 1; lv <= 5; lv++) {
-      const p = makePlayer("s", { base: true, level: 1, x: 500, y: 500, auto: true });
+      const p = makePlayer("s", { hasBase: true, baseX: 500, baseY: 500, auto: true });
       p.levels.cargo = lv;
-      const sim = new Sim({ players: [p], seed: 42 });
-      sim.zone.nextSpawnAt = 1_000_000;
+      const state = simWithPlayers([p]);
       for (let t = 0; t < 24 * 60; t++) {
-        sim.tick(1_000_000 + t * WORLD.TICK_SECONDS * 1000);
+        simTick(state, 1_000_000 + t * WORLD.TICK_SECONDS * 1000, zoneActiveAt(t));
         if (p.storageKg > 0) {
           if (!p.processing.sessionId) p.processing.sessionId = `${p.id}:s`;
           p.processing.queuedKg += p.storageKg;
           p.storageKg = 0;
         }
-        const inv = sim.invariant();
+        const inv = simInvariant(state);
         expect(Math.abs(inv.massBalance)).toBeLessThan(EPS);
         expect(Math.abs(inv.poolBalance)).toBeLessThan(EPS);
       }
@@ -324,7 +337,7 @@ describe("4. rebalanced cost curves", () => {
 
   test("progression ROI at the measured starter rate (500 TOX/ton)", () => {
     const starter = runAxis({ queue: "diligent" });
-    const dailyTox = starter.p.toxBalance; // 24 game-h, seed 42 (frozen baseline)
+    const dailyTox = starter.p.toxBalance; // 24 game-h (frozen 500 TOX/t baseline)
     console.log("── PROGRESSION ROI (rebalanced curves, starter 500 TOX/t) ────────");
     console.log("  track   | L2 (game-h / real-h) | L3 | L4 | L5 | total");
     for (const track of ["cargo", "storage", "battery", "recharge"] as const) {

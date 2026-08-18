@@ -119,8 +119,11 @@ describe("protection state machine (protection.ts)", () => {
 
   test("launchDue: 5 real-minute countdown", () => {
     const now = 100_000;
-    expect(launchDue(now + PROTECTION.LAUNCH_WINDOW_MS - 1, now)).toBe(false);
-    expect(launchDue(now + PROTECTION.LAUNCH_WINDOW_MS, now)).toBe(true);
+    // launchAt is the COMPLETION timestamp (game.ts sets now + WINDOW); due
+    // means the current time has reached it.
+    expect(launchDue(now + PROTECTION.LAUNCH_WINDOW_MS - 1, now)).toBe(false); // countdown running
+    expect(launchDue(now, now)).toBe(true); // exactly due
+    expect(launchDue(now - 1, now)).toBe(true); // overdue
     expect(launchDue(undefined, now)).toBe(false);
   });
 
@@ -236,8 +239,15 @@ describe("protection in the world tick (oracle mirrors world.ts)", () => {
 
     for (const c of cases) {
       const s = freshWorld(WORLD.CAPACITY_KG, 0.99999);
-      const lastActiveAt = c.stale ? Date.now() - PROTECTION.AFK_AFTER_MS - 1 : Date.now();
+      // sim-relative clock: the sim's ticks start at 0, so "idle 12h+" is a
+      // NEGATIVE lastActiveAt (Date.now()-based timestamps would read as
+      // future activity and the base would never go AFK).
+      const lastActiveAt = c.stale ? -(PROTECTION.AFK_AFTER_MS + 1) : 0;
       s.players.push(mk("p1", c.state, lastActiveAt));
+      // a world whose ONLY base is sealed can never collapse (sealed bases
+      // generate nothing, doc §2.3) — add a normal generating "drone" base so
+      // pollution is driven to 100% while the protected player rides along.
+      s.players.push(mk("drone", "normal", 0));
       const after = untilCollapse(s);
       const p = after.players[0];
       expect(p.protection.state, c.name).toBe(c.expectedState);
@@ -290,6 +300,9 @@ describe("protection in the world tick (oracle mirrors world.ts)", () => {
       auto: false,
     }, 0);
     s.players.push(p);
+    // the seeded queue (1000 kg) is real pool mass — debit it from the
+    // collectable pool so Layer 2 starts exact (mirrors harness:seedLoad).
+    s.world.collectableKg = Math.max(0, s.world.collectableKg - 1000);
     const pollutionBefore = s.world.pollutionKg;
     const r = runTicks(s, 10); // 50 real seconds → 100 kg burned
     const q = r.state.players[0];
@@ -318,6 +331,9 @@ describe("protection in the world tick (oracle mirrors world.ts)", () => {
       auto: false,
     }, now);
     s.players.push(p);
+    // the seeded storage (100 kg) is real pool mass — debit it from the
+    // collectable pool (mirrors harness:seedLoad) so Layer 2 starts exact.
+    s.world.collectableKg = Math.max(0, s.world.collectableKg - 100);
     const startTreasury = s.world.treasuryTox;
     // run past the 5-minute window
     let t = s.world.lastTick;
