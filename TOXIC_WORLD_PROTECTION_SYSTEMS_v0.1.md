@@ -1,6 +1,7 @@
-# TOXIC WORLD — PROTECTION SYSTEMS DESIGN v0.1 (SPRINT 2.11)
+# TOXIC WORLD — PROTECTION SYSTEMS DESIGN v0.1 (SPRINT 2.11 + 2.12)
 
-Status: **FROZEN for implementation** (this sprint).
+Status: **FROZEN for implementation** (Sprint 2.11); **economy validated,
+conditional freeze** (Sprint 2.12 — see §8).
 Supersedes: no prior doc (the Design Freeze v0.3 listed the four systems as
 decisions without mechanics; the Engineering Handoff carried them as
 "NOT IMPLEMENTED", next-task #2).
@@ -175,14 +176,14 @@ lands, this field becomes its simulation anchor.
 
 | Constant | Value | Status |
 |---|---|---|
-| `AFK_AFTER_MS` | 12 real hours | freeze v0.1 `[PLAYTEST]` |
-| `UNLOCK_COST_TOX` | 200 | freeze v0.1 `[PLAYTEST]` |
-| `SHIELD_COST_TOX` | 150 | freeze v0.1 `[PLAYTEST]` |
-| `SHIELD_DURATION_MS` | 2 real hours | freeze v0.1 `[PLAYTEST]` |
-| `CRITICAL_DRAIN_MULT` | 2 (unshielded, critical only) | freeze v0.1 `[PLAYTEST]` |
-| `LAUNCH_FEE_TOX` | 300 | freeze v0.1 `[PLAYTEST]` |
+| `AFK_AFTER_MS` | 12 real hours | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12, kept** |
+| `UNLOCK_COST_TOX` | 200 | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12, kept** |
+| `SHIELD_COST_TOX` | 150 | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12, kept (flag §8.6)** |
+| `SHIELD_DURATION_MS` | 2 real hours | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12, kept** |
+| `CRITICAL_DRAIN_MULT` | 2 (unshielded, critical only) | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12, kept** |
+| `LAUNCH_FEE_TOX` | 300 | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12, kept** |
 | `LAUNCH_WINDOW_MS` | 5 real minutes | freeze v0.1 |
-| `TREASURY_BURN_FRAC` | 0.15 | freeze v0.1 `[PLAYTEST]` |
+| `TREASURY_BURN_FRAC` | 0.15 | freeze v0.1 `[PLAYTEST]` — **validated Sprint 2.12 (server-side, floor 0)** |
 | `TREASURY_SEED_TOX` | 1,000,000 (MOCK) | placeholder |
 
 ## 6. EXISTING ECONOMY IMPACT (measured, not assumed)
@@ -199,9 +200,129 @@ lands, this field becomes its simulation anchor.
 
 | Item | Note |
 |---|---|
-| All TOX costs/durations | `[PLAYTEST]` — placeholders pending playtest, same discipline as Sprint 2.10 |
-| Treasury −15% | MOCK world accumulator (see §4) — not a payout rail |
+| Shield value in critical | measured starter value ≈ 5 TOX/game-h vs 6.25 TOX/game-h cost of coverage — slight overpay for short-trip starters; value scales with trip length/map sparsity; flagged for playtest (§8.6) |
 | AFK 12h | real time (player-facing); game-time AFK is a future option |
-| Locked burn continues | deliberate anti-deadlock choice (unlock fee earnable); flagged |
+| Locked burn continues | deliberate anti-deadlock choice (unlock fee earnable) — validated: sealed queue burns and pays the unlock fee |
 | AFK keeps stockpile on collapse | fairness asymmetry, flagged for playtest |
-| UI | Defense tab shows all four systems + countdowns (implemented this sprint) |
+| Treasury −15% | MOCK world accumulator (see §4) — not a payout rail |
+| Usage frequency | synthetic 4% AFK/day; shield/lock usage only measurable in critical-world sims (event-driven) |
+| UI | Defense tab shows all four systems + countdowns (implemented Sprint 2.11) |
+
+---
+
+## 8. SPRINT 2.12 — PROTECTION ECONOMY VALIDATION (measured)
+
+Suite: `tests/protectionEconomyValidation.test.ts` — 56 tests / 0 fail (added
+this sprint; full suite now 149 tests / 109,827 assertions / 0 fail). All
+measurements use the deterministic oracle (`tests/engineSim.ts` → mirrors
+`world.ts`/`engine.ts`/`economy.ts`) and the **new deterministic starter
+baseline: 1,919.5 TOX/day = 79.98 TOX/game-h = 959.75 TOX/real-h** (the
+2,206.7 TOX/day value is a superseded benchmark).
+
+### 8.1 Storage + AFK interaction (does AFK invalidate storage? — NO)
+
+| Cadence (24 game-h, L1 storage 60 kg) | TOX/day | Loss vs diligent |
+|---|---|---|
+| diligent (queue every tick) | 1,919.5 | — |
+| 1 game-h check-in (AVERAGE ACTIVE) | 723 | 62% |
+| 6 game-h check-in (OCCASIONAL) | 93 | 95% |
+| 12 game-h idle then return | ~990 (12 game-h lost) | 48% |
+
+AFK Protection does NOT devalue Storage: storage remains the difference
+between the 1-game-h check-in player (723/day) and the occasional player
+(93/day). Long AFK costs the idle hours' income outright — protection only
+saves the **stockpile**, never the missed income (correct by design).
+
+### 8.2 Player profiles (24 game-h)
+
+| Profile | TOX/day | Protection spend | Notes |
+|---|---|---|---|
+| GOOD ACTIVE (diligent) | 1,919.5 | 0 | no protection needed |
+| AVERAGE ACTIVE (1 game-h check-in) | 723 | 0 | 57.5% storage stall |
+| OCCASIONAL (6 game-h check-in) | 93 | 0 | storage-bound |
+| LONG AFK (12 game-h idle) | ~990 | 0 (AFK free) | 12 h income lost; stockpile safe at collapse |
+| CRITICAL WORLD (shielded in critical) | ~1,700+ | 150/day (1 shield) | shield preserves drain; see §8.6 |
+
+### 8.3 Economic comparison (starter 79.98 TOX/game-h)
+
+| System | TOX cost | game-h to afford | What it saves | Differentiation |
+|---|---|---|---|---|
+| AFK | 0 | — | stockpile at collapse (auto-lock) | free + automatic; costs missed income + eventual 200 unlock |
+| Base Lock | 200 | 2.50 (0.21 real-h) | stockpile + base at collapse | voluntary; generation STOPS (pollution tool); resume at 200 |
+| Toxic Shield | 150 | 1.88 (0.16 real-h) | critical battery drain (activity only) | 24 game-h coverage; never blocks collapse |
+| Emergency Launch | 300 | 3.75 (0.31 real-h) | escape a locked base; keeps TOX wealth | exit hatch when unlock is unaffordable; loses base+robot+stockpile, treasury −15% |
+
+Pairwise: **AFK vs Lock** — same collapse outcome, different terms (AFK is
+free + forced at collapse; Lock is voluntary + 200 and actively reduces
+pollution). **Shield vs Launch** — never substitutes (150 insurance for
+activity vs 300 exit). **Lock vs Launch** — Lock preserves and resumes for
+200; Launch abandons for 300. No two systems solve the same problem.
+
+### 8.4 Cost sensitivity (playtest values NOT accepted blindly)
+
+Affordability at 0.5×/1×/1.5×/2× (starter game-h of income): unlock 1.25 /
+2.50 / 3.75 / 5.00; shield 0.94 / 1.88 / 2.81 / 3.75; launch 1.88 / 3.75 /
+5.63 / 7.50. Shield coverage cost per game-h: 75 → 3.13 (3.91% of daily
+income), 150 → 6.25 (7.81%), 225 → 9.38 (11.72%), 300 → 12.50 (15.63%).
+Unlock at 100/200/300/400 TOX = 1.25 / 2.50 / 3.75 / 5.00 game-h — **200
+keeps unlock within one play session while remaining a real decision**
+(100 would be friction-free, 400+ starts to feel punitive on top of the
+already-lost sealed income).
+
+### 8.5 Usage frequency at scale (deterministic, 24 game-h)
+
+| Population | AFK triggers/day | Shield purchases | Lock events | TOX sink |
+|---|---|---|---|---|
+| 10 | 0 | 0 | 0 | 0 |
+| 100 | 4 (4%) | 0 | 0 | 0 |
+| 1,000 | 40 (4%) | 0 | 0 | 0 |
+| 10,000 (50% active) | deterministic, invariant-exact | 0 | 0 | 0 |
+
+AFK ≈ 4% of population/day (seeded inactive cohort) at every scale and
+activity split. Shield/lock are **event-driven**: 0 in safe-world sims —
+their usage only materializes in critical/collapse scenarios (measured in the
+profile + collapse tests). The only recurring sink at steady state is AFK's
+unlock fee when a collapsed player returns (event, not daily).
+
+### 8.6 Findings → recommended values
+
+1. **AFK — keep 12 real-h, free.** Storage is the true buffer; AFK is the
+   safety net. No cost dimension to tune.
+2. **Base Lock unlock — keep 200 TOX.** 10.42% of daily income, one session,
+   earnable while sealed (queue keeps burning — anti-deadlock verified).
+3. **Toxic Shield — keep 150 TOX / 2 real-h, with a playtest flag.** Measured
+   protection value for a short-trip starter in critical ≈ 5 TOX/game-h vs
+   6.25 TOX/game-h cost of coverage — a slight overpay that is justified as
+   insurance and scales with trip length (bigger cargo / sparser map). If
+   playtest shows critical phases are rare, 100–125 is the fallback.
+4. **Emergency Launch — keep 300 TOX / 5 min.** 15.63% of daily income;
+   correctly priced above unlock (200) because it also abandons the base.
+   Penalties verified server-side: base −1, robot −1 (reserve unit), held
+   waste returned to pool accounting, treasury ×0.85 (floor 0).
+
+**PROTECTION ECONOMY FREEZE (conditional, Sprint 2.12):** AFK = free / 12
+real hours; BASE LOCK unlock = 200 TOX; TOXIC SHIELD = 150 TOX / 2 real
+hours (value flag §8.6.3); EMERGENCY LAUNCH = 300 TOX / 5 real minutes.
+Condition: the shield flag is resolved by a playtest of critical-phase
+frequency before launch. Everything else is test-supported as-is.
+
+### 8.7 Acceptance criteria → status
+
+| Criterion | Status |
+|---|---|
+| Protection state transitions deterministic | ✔ (13. determinism test) |
+| Lock works (generation off, robot parked, stockpile kept, queue burns) | ✔ §4 |
+| AFK works (12h detect, generation continues, collapse auto-lock, return) | ✔ §5 |
+| Shield works (critical drain, no collapse block) | ✔ §3 + §8.6 |
+| Emergency Launch works (5 min, cancel, penalties, re-entry grant) | ✔ §7 |
+| Collapse interactions deterministic | ✔ §11 matrix |
+| No protection creates duplicate reward | ✔ (ledger keys slice-unique) |
+| Storage interaction consistent | ✔ §8.1 |
+| TOX costs measurable | ✔ §8.3–8.4 |
+| Usage frequency measurable | ✔ §8.5 |
+| 10/100/1k/10k scale test | ✔ §10 |
+| 100/75/50/25% active tests | ✔ §10 |
+| Deterministic oracle passes | ✔ |
+| Full test suite passes | ✔ 149 tests / 0 fail |
+| Typecheck passes | ✔ `bun tsc -b --noEmit` |
+| No unexplained invariant drift | ✔ every scenario (`simInvariant` exact) |
