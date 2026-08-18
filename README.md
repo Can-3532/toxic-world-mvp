@@ -128,10 +128,11 @@ Conversions (5 s tick, 1 game-min/tick): `1 game-h = 60 ticks = 5 real-min`;
 ## Tests
 
 ```bash
-bun test tests/                 # all 92 tests (26 economy + 29 engine + 27 economy-validation + 10 storage/battery), 67,846 assertions
+bun test tests/                 # all 115 tests (26 economy + 29 engine + 27 economy-validation + 10 storage/battery + 23 protection), 67,956 assertions
 bun test tests/engine.test.ts   # production engine test harness (Sprint 2.4 + 2.5 + 2.6)
 bun test tests/economy.test.ts  # v0.4 reward formulas, idempotency, pollution accounting
 bun test tests/economyValidation.test.ts  # Sprint 2.8: 5 s-tick economy (two time axes)
+bun test tests/protectionValidation.test.ts  # Sprint 2.11: Lock / AFK / Shield / Emergency Launch
 
 # Live invariant audit against the deployed Convex engine (read-only):
 bunx convex run harness:invariantAudit
@@ -255,6 +256,31 @@ baseline):
    total sink 3,365 TOX = 1.52 game-days to max all tracks (was 1.92).
    Caps/mechanics unchanged — cost-only rebalance.
 
+### Sprint 2.11 — Protection systems (Base Lock / AFK / Shield / Emergency Launch)
+
+`bun test tests/protectionValidation.test.ts` — 23 tests, green. Design/freeze
+doc: **`TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1.md`**. One protection state machine
+per player (`players.protection` + `players.lastActiveAt`):
+
+- **Base Lock** — free to seal (`lockBase`): generation off, robot recalled
+  & parked, storage/cargo/queue preserved through world collapse, existing
+  burn queue keeps running (unlock fee stays earnable — no deadlock). Unlock
+  costs 200 TOX (`unlockBase`).
+- **AFK Protection** — 12 real hours without an action → `afk`; the base stays
+  on autopilot (generation + collection continue, Storage is the AFK buffer),
+  and at the next world collapse it **auto-locks** and keeps its stockpile.
+- **Toxic Shield** — 150 TOX for 2 real hours of immunity to the ×2 field
+  battery drain that hits unshielded robots while the world is CRITICAL. It
+  never prevents world collapse.
+- **Emergency Launch** — from a locked base: 5 real-minute countdown
+  (`launchBase`/`cancelLaunch`), then Base −1, Robot −1, 300 TOX fee and 15%
+  of the mock world treasury, with a mock re-entry SOL grant so the loop
+  stays playable. The abandoned stockpile returns to the collectable pool.
+- Collapse accounting keeps BOTH invariant layers exact: preserved holdings
+  are subtracted from the new world's seeded recoverable pool (`collapseSeed`
+  in `src/convex/protection.ts`), and over-cap preservation scales
+  proportionally. UI: Defense tab + sealed banner + locked map controls.
+
 ### Sprint 2.7 — tick architecture (A/B/C decision)
 
 - **A — production benchmark: BLOCKED at credentials.** No production
@@ -297,7 +323,7 @@ bunx convex run harness:benchStatus       # counts + both invariant layers + dup
 
 Results (LIVE on `jovial-chickadee-617`, usage limit re-enabled, full sequence
 cleanup → reset → concurrency → 10/100/1k/10k benches → audit → cleanup → reset):
-- **Headless engine suite: ALL PASS** (`bun test tests/` — 92 tests / 67,846
+- **Headless engine suite: ALL PASS** (`bun test tests/` — 115 tests / 67,956
   assertions), including the 10k-player scale sim (invariant holds at every
   scale; 10k headless tick ≈ 55 ms).
 - **Concurrency: PASS (live).** 5 concurrent unthrottled `tickOnce` — all 5
@@ -364,7 +390,9 @@ cleanup → reset → concurrency → 10/100/1k/10k benches → audit → cleanu
   world baseline (`harness:resetWorld`), Sprint 2.6 concurrency-verified tick
   and sharded scaling (`ROBOTS_PER_TICK` + sharded burn), exactly-once burn
   slices (`advanceBurn` contract fix), Sprint 2.10 storage/battery cost
-  rebalance, and a complete headless test suite (92 tests) that passes.
+  rebalance, Sprint 2.11 protection systems (Lock / AFK / Shield / Emergency
+  Launch) with protection-aware collapse accounting, and a complete headless
+  test suite (115 tests) that passes.
 - **Blocked (platform):** the dev deployment is DISABLED (usage limit exceeded
   during the previous Sprint 2.6 session) and still holds stranded `LOADTEST`
   players. Re-enable/raise the limit in the Convex dashboard, run
@@ -373,10 +401,11 @@ cleanup → reset → concurrency → 10/100/1k/10k benches → audit → cleanu
   `bun tests/liveBench.ts 10000 5 0.5 0.05`).
 - **Mock:** SOL balance (off-chain ledger) used only for the base purchase. No
   wallet, no Solana transaction.
-- **Not implemented:** real settlement, reward outbox for SOL payouts, protection
-  systems (Base Lock / AFK / Shield / Emergency Launch), leaderboard pagination,
-  live-DB load tests at 10k players (the 10k scale test runs the headless
-  oracle sim, not the Convex DB path).
+- **Not implemented:** real settlement, reward outbox for SOL payouts, leaderboard
+  pagination, live-DB load tests at 10k players (the 10k scale test runs the
+  headless oracle sim, not the Convex DB path). Protection systems are
+  IMPLEMENTED (Sprint 2.11) — costs are [PLAYTEST] placeholders and the
+  treasury is a mock vault.
 
 See `TOXIC_WORLD_ENGINEERING_HANDOFF_v0.1.md` for the full engineering handoff,
 known risks, and the next-task list.

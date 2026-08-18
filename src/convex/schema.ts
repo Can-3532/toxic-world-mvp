@@ -33,6 +33,23 @@ export const worldStatusValidator = v.union(
 );
 export type WorldStatus = Infer<typeof worldStatusValidator>;
 
+export const protectionStateValidator = v.union(
+  v.literal("normal"),
+  v.literal("afk"),
+  v.literal("locked"),
+  v.literal("launching"),
+);
+export type ProtectionState = Infer<typeof protectionStateValidator>;
+
+export const protectionValidator = v.object({
+  state: protectionStateValidator,
+  lockedAt: v.optional(v.number()),
+  lockReason: v.optional(v.union(v.literal("voluntary"), v.literal("collapse"))),
+  shieldUntil: v.optional(v.number()),
+  launchAt: v.optional(v.number()),
+});
+export type Protection = Infer<typeof protectionValidator>;
+
 const schema = defineSchema(
   {
     // default auth tables using convex auth.
@@ -72,6 +89,10 @@ const schema = defineSchema(
       invariantSkewKg: v.optional(v.number()),
       // Sprint 2.6: monotonic tick counter (shard rotation for large worlds)
       tickIndex: v.optional(v.number()),
+      // Sprint 2.11: MOCK world treasury (protection doc §4) — a world-level
+      // TOX vault gameplay never credits; exists so Emergency Launch's −15%
+      // mechanic is real/testable. NOT a payout rail.
+      treasuryTox: v.optional(v.number()),
     }),
 
     // waste clusters on the map — the collectable pool materialized spatially
@@ -118,6 +139,12 @@ const schema = defineSchema(
         battery: v.number(), // 1..5
         storage: v.number(), // 1..5
       }),
+      // Sprint 2.11 — protection systems (Lock / AFK / Shield / Launch).
+      // lastActiveAt: refreshed by every player mutation; 12 real hours of
+      // inactivity → afk (see protection.ts). Legacy docs without these fields
+      // are read with fallbacks (state "normal", lastActiveAt = _creationTime).
+      lastActiveAt: v.number(),
+      protection: protectionValidator,
       robot: v.object({
         state: robotStateValidator,
         x: v.number(),

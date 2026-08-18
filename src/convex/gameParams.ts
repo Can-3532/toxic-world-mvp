@@ -62,6 +62,36 @@ export const WORLD = {
   ROBOTS_PER_TICK: 2500,
 } as const;
 
+// --- SPRINT 2.11 — PROTECTION SYSTEMS (TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1)
+// One protection state machine per player: normal / afk / locked / launching.
+// All TOX costs are [PLAYTEST] placeholders pending playtest (same discipline
+// as the Sprint 2.10 storage/battery rebalance). Time values are REAL time
+// (player-facing), matching the robot/burn real-time anchors.
+export const PROTECTION = {
+  // 12 real hours without a player action → base enters AFK (autopilot).
+  // AFK only matters at collapse: the base auto-locks (keeps its stockpile).
+  AFK_AFTER_MS: 12 * 3_600_000,
+  // Base Lock unlock fee (TOX). Locked bases keep burning their existing
+  // queue so the fee is always earnable — the system cannot deadlock.
+  UNLOCK_COST_TOX: 200,
+  // Toxic Shield: personal activity buff. While the world is CRITICAL
+  // (≥90%), an unshielded robot's field battery drains ×CRITICAL_DRAIN_MULT.
+  // The shield never prevents/delays world collapse.
+  SHIELD_COST_TOX: 150,
+  SHIELD_DURATION_MS: 2 * 3_600_000, // 2 real hours
+  CRITICAL_DRAIN_MULT: 2,
+  // Emergency Launch: escape from a locked base. 5 real-minute countdown,
+  // then Base −1, Robot −1, treasury −15% (mock), player keeps TOX + gets a
+  // mock re-entry SOL grant so the loop stays playable.
+  LAUNCH_FEE_TOX: 300,
+  LAUNCH_WINDOW_MS: 5 * 60_000,
+  TREASURY_BURN_FRAC: 0.15,
+  // MOCK world treasury (see protection doc §4): a world-level TOX vault that
+  // gameplay never credits; it exists so the −15% launch mechanic is real and
+  // testable. NOT a payout rail — that is a future Solana/outbox task.
+  TREASURY_SEED_TOX: 1_000_000,
+} as const;
+
 // --- v0.4 reward economy ---------------------------------------------
 export const TOX_PER_TON = 500; // 1 ton burned waste = 500 TOX (normal burn)
 export const BURN_ZONE_MULTIPLIER = 1.2; // Burn Zone: ×1.2 => 600 TOX / ton

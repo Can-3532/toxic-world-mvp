@@ -10,7 +10,7 @@ import { WorldMap } from "@/components/game/WorldMap";
 import { Panels } from "@/components/game/Panels";
 import { fmtKg, fmtSol, fmtTox } from "@/components/game/format";
 import { toast } from "sonner";
-import { Biohazard, Coins, Flame, House, Loader2, LogOut, Skull, Zap } from "lucide-react";
+import { Biohazard, Coins, Flame, House, Loader2, Lock, LogOut, Skull, Zap } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
 function errMsg(e: unknown): string {
@@ -33,6 +33,12 @@ export default function Game() {
   const toggleAuto = useMutation(api.game.toggleAuto);
   const queueProcessing = useMutation(api.game.queueProcessing);
   const upgrade = useMutation(api.game.upgrade);
+  // Sprint 2.11 — protection systems
+  const lockBase = useMutation(api.game.lockBase);
+  const unlockBase = useMutation(api.game.unlockBase);
+  const activateShield = useMutation(api.game.activateShield);
+  const launchBase = useMutation(api.game.launchBase);
+  const cancelLaunch = useMutation(api.game.cancelLaunch);
 
   useEffect(() => {
     void ensurePlayer().catch((e) => console.error("[game] ensurePlayer:", e));
@@ -43,6 +49,9 @@ export default function Game() {
   const critical = frac >= WORLD.CRITICAL_FRAC;
   const zone = world?.zone ?? null;
   const zoneActive = zone?.status === "active";
+  // Sprint 2.11 — protection state
+  const protState = me?.protection?.state ?? "normal";
+  const sealed = (protState === "locked" || protState === "launching") && !!me?.hasBase;
 
   const handleSignOut = async () => {
     await signOut();
@@ -52,6 +61,10 @@ export default function Game() {
   const handleCommand = async (clusterId: Id<"wasteClusters">) => {
     if (!me?.hasBase) {
       toast.error("No base", { description: "Deploy your base first." });
+      return;
+    }
+    if (sealed) {
+      toast.error("Base sealed", { description: "Unlock your base before commanding the robot." });
       return;
     }
     try {
@@ -99,6 +112,58 @@ export default function Game() {
       });
     } catch (e) {
       toast.error("Upgrade failed", { description: errMsg(e) });
+    }
+  };
+
+  // Sprint 2.11 — protection handlers
+  const handleLockBase = async () => {
+    try {
+      await lockBase();
+      toast.success("Base locked", {
+        description: "Sealed — generation stopped, robot parked, stockpile protected.",
+      });
+    } catch (e) {
+      toast.error("Lock failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleUnlockBase = async () => {
+    try {
+      await unlockBase();
+      toast.success("Base unlocked", { description: "Operations resumed." });
+    } catch (e) {
+      toast.error("Unlock failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleActivateShield = async () => {
+    try {
+      await activateShield();
+      toast.success("Toxic Shield active", {
+        description: "Your robot is immune to critical-state battery drain for 2h.",
+      });
+    } catch (e) {
+      toast.error("Shield failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleLaunchBase = async () => {
+    try {
+      await launchBase();
+      toast.success("Launch armed", {
+        description: "Base will self-destruct in 5 min unless cancelled.",
+      });
+    } catch (e) {
+      toast.error("Launch failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleCancelLaunch = async () => {
+    try {
+      await cancelLaunch();
+      toast.success("Launch cancelled", { description: "Base remains sealed." });
+    } catch (e) {
+      toast.error("Cancel failed", { description: errMsg(e) });
     }
   };
 
@@ -162,6 +227,13 @@ export default function Game() {
         </div>
         {(critical || zoneActive) && <div className="hazard-stripes-dark h-1.5 w-full" />}
       </header>
+
+      {/* SEALED BANNER — Sprint 2.11 */}
+      {sealed && (
+        <div className="animate-blink border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.2em] text-red-400">
+          🔒 BASE SEALED — {protState === "launching" ? "EMERGENCY LAUNCH COUNTDOWN ACTIVE" : "GENERATION OFF · ROBOT PARKED · STOCKPILE PROTECTED"}. OPEN THE DEFENSE TAB.
+        </div>
+      )}
 
       {/* CRITICAL / BURN ZONE BANNER */}
       {critical && (
@@ -227,6 +299,11 @@ export default function Game() {
           onToggleAuto={handleToggleAuto}
           onQueueProcessing={handleQueueProcessing}
           onUpgrade={handleUpgrade}
+          onLockBase={handleLockBase}
+          onUnlockBase={handleUnlockBase}
+          onActivateShield={handleActivateShield}
+          onLaunchBase={handleLaunchBase}
+          onCancelLaunch={handleCancelLaunch}
         />
       </main>
 

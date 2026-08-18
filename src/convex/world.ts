@@ -4,11 +4,23 @@ import { Doc, Id } from "./_generated/dataModel";
 import {
   BURN_ZONE,
   BURN_ZONE_MULTIPLIER,
+  PROTECTION,
   ROBOT,
   UPGRADES,
   WORLD,
   batteryForTrip,
 } from "./gameParams";
+import {
+  applyIdleCheck,
+  collapseSeed,
+  drainMultiplier,
+  isSealed,
+  keepsHeldOnCollapse,
+  launchDue,
+  onWorldCollapse,
+  proportionalPreserve,
+  type Protection,
+} from "./protection";
 import {
   advanceBurn,
   applyBurnToPollution,
@@ -120,6 +132,8 @@ export async function seedWorld(
     generatedKg: 0,
     invariantSkewKg: 0,
     tickIndex: 0,
+    // Sprint 2.11 — MOCK world treasury (protection doc §4)
+    treasuryTox: PROTECTION.TREASURY_SEED_TOX,
   });
   // LOAD-BEARING (Sprint 2.5): spawnClusters deducts from the collectable
   // pool — the remaining balance MUST be written back, or the seeded clusters
@@ -155,6 +169,7 @@ async function stepRobot(
   clusterMap: ClusterMap,
   now: number,
   dtReal: number,
+  drainMult: number,
   assignments: Map<string | number, string | number>,
 ): Promise<boolean> {
   if (!p.hasBase) return false;
@@ -223,7 +238,9 @@ async function stepRobot(
     case "to_cluster": {
       const target = r.targetClusterId ? clusterMap.get(r.targetClusterId) : undefined;
       const dest = target ?? base;
-      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal);
+      // Sprint 2.11 toxic shield: critical-state drain multiplier applies to
+      // field operations only (movement + collection), never to base recharge.
+      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
       const total = (r.arriveAt ?? now) - r.departAt;
       if (total > 0) {
         const t = Math.min(1, (now - r.departAt) / total);
@@ -247,7 +264,7 @@ async function stepRobot(
       break;
     }
     case "collecting": {
-      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_COLLECTING * dtReal);
+      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_COLLECTING * dtReal * drainMult);
       if (now >= (r.busyUntil ?? now)) {
         const target = r.targetClusterId ? clusterMap.get(r.targetClusterId) : undefined;
         if (target && target.kg > 0) {
@@ -269,7 +286,7 @@ async function stepRobot(
       break;
     }
     case "to_base": {
-      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal);
+      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
       const total = (r.arriveAt ?? now) - r.departAt;
       if (total > 0) {
         const t = Math.min(1, (now - r.departAt) / total);
@@ -407,15 +424,41 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
       .collect();
     const clusterMap: ClusterMap = new Map(
       clusterList.map((c) => [c._id, c]),
-    );
+    );      // SPRINT 2.11 — protection states for every player. Legacy docs (pre-2.11)
+    // have no protection/lastActiveAt: read as NORMAL, and lastActiveAt falls
+    // back to creation time so they never instantly go AFK. Only bases can
+    // enter AFK; the transition patches are rare (once per idle player), so
+    // this pass stays far inside the per-tick write budget even at 10k.
+    const prots = new Map<Id<"players">, Protection>();
+    const afkPatches: { id: Id<"players">; protection: Protection }[] = [];
+    for (const p of players) {
+      const base = p.protection ?? { state: "normal" };
+      const prot = p.hasBase
+        ? applyIdleCheck(base, p.lastActiveAt ?? p._creationTime, now)
+        : base;
+      prots.set(p._id, prot);
+      if ((p.protection?.state ?? "normal") !== prot.state) {
+        afkPatches.push({ id: p._id, protection: prot });
+      }
+    }
+    for (const patch of afkPatches) {
+      await ctx.db.patch(patch.id, { protection: patch.protection });
+    }
 
-    // 1) base generation → pollution
+    // 1) base generation → pollution. Sealed bases (locked/launching) emit
+    // nothing — locking is a voluntary reduction of your pollution footprint
+    // (and a cooperative world-saving tool during critical). AFK bases stay
+    // on autopilot and keep generating (Sprint 2.9 collapse-matrix model).
     const active = players.filter((p) => p.hasBase);
-    const genKgH = active.length * WORLD.BASE_GEN_KG_H;
+    const generating = active.filter((p) => !isSealed(prots.get(p._id)!.state));
+    const genKgH = generating.length * WORLD.BASE_GEN_KG_H;
     let pollutionKg = Math.min(
       world.capacityKg,
       world.pollutionKg + genKgH * TICK_GAME_H,
     );
+    // Toxic Shield: the drain multiplier applies to field operations while the
+    // world is CRITICAL at the robot phase (post-generation, pre-burn).
+    const criticalNow = pollutionKg / world.capacityKg >= WORLD.CRITICAL_FRAC;
     // Sprint 2.4 harness: cumulative generation + invariant anchor
     // (mass balance: pollutionKg + burnedKg == seedPollutionKg + generatedKg)
     let generatedKg = (world.generatedKg ?? 0) + genKgH * TICK_GAME_H;
@@ -444,6 +487,7 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
           ({ p, i }) =>
             i % shardCount === shardIndex &&
             p.hasBase &&
+            !isSealed(prots.get(p._id)!.state) && // sealed robots are parked
             p.robot.auto &&
             p.robot.state === "idle" &&
             p.robot.cargoKg < cargoCap(p),
@@ -463,12 +507,23 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
     );
     let demandKgH = 0;
     for (const [i, p] of players.entries()) {
+      const sealed = isSealed(prots.get(p._id)!.state);
       if (i % shardCount !== shardIndex) {
         // unstepped this tick: a frozen mid-trip robot still generates demand
-        if (robotDemands(p.robot.state)) demandKgH += WORLD.DEMAND_REF_KG_H;
+        if (!sealed && robotDemands(p.robot.state)) demandKgH += WORLD.DEMAND_REF_KG_H;
         continue;
       }
-      const isActive = await stepRobot(ctx, p, clusterMap, now, dtReal, batchAssignments);
+      if (sealed) continue; // parked — no movement, no demand, no drain
+      const drainMult = drainMultiplier(prots.get(p._id)!, now, criticalNow);
+      const isActive = await stepRobot(
+        ctx,
+        p,
+        clusterMap,
+        now,
+        dtReal,
+        drainMult,
+        batchAssignments,
+      );
       if (isActive) demandKgH += WORLD.DEMAND_REF_KG_H;
     }
 
@@ -588,6 +643,7 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
     // 7) world status / collapse (engine.ts worldStatus — shared with the harness)
     let status: Doc<"worlds">["status"] = worldStatus(pollutionKg, world.capacityKg);
     let newWorldId = worldId;
+    let treasuryTox = world.treasuryTox ?? PROTECTION.TREASURY_SEED_TOX;
     if (pollutionKg >= world.capacityKg) {
       await addEvent(
         ctx,
@@ -600,10 +656,27 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
         await ctx.db.delete(c._id);
       }
       clusterMap.clear();
-      pollutionKg = world.capacityKg * WORLD.RESET_POLLUTION_FRAC;
-      collectableKg = pollutionKg * WORLD.INITIAL_COLLECTABLE_FRAC;
-      hiddenKg = pollutionKg - collectableKg;
       status = "safe";
+      // SPRINT 2.11 — protection-aware collapse (protection doc §3).
+      // NORMAL bases lose their stockpile (v0.4 behavior); AFK bases
+      // auto-lock (lockReason "collapse") and keep it; LOCKED / LAUNCHING
+      // bases keep it. Preserved holdings are carried into the next cycle
+      // and subtracted from the seeded recoverable pool (collapseSeed) so
+      // both invariant layers stay EXACT by construction.
+      let carriedKg = 0;
+      for (const p of players) {
+        const prot = p.hasBase
+          ? onWorldCollapse(prots.get(p._id)!, now)
+          : prots.get(p._id)!;
+        prots.set(p._id, prot);
+        if (p.hasBase && keepsHeldOnCollapse(prot.state)) {
+          carriedKg += p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
+        }
+      }
+      const seed = collapseSeed(world.capacityKg, carriedKg);
+      pollutionKg = seed.pollutionKg;
+      hiddenKg = seed.hiddenKg;
+      collectableKg = seed.collectableKg;
       // re-anchor the waste invariant for the new world cycle
       burnedKg = 0;
       generatedKg = 0;
@@ -611,18 +684,25 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
       for (const p of players) {
         const bx = p.baseX ?? WORLD.MAP_SIZE / 2;
         const by = p.baseY ?? WORLD.MAP_SIZE / 2;
+        const prot = prots.get(p._id)!;
+        const keep = p.hasBase && keepsHeldOnCollapse(prot.state);
+        const held = keep
+          ? proportionalPreserve(carriedKg, seed.preservedKg, {
+              storage: p.storageKg,
+              cargo: p.robot.cargoKg,
+              processing: p.processing.queuedKg,
+            })
+          : { storage: 0, cargo: 0, processing: 0 };
         await ctx.db.patch(p._id, {
           worldId: newWorldId,
-          // Sprint 2.5 consistency: waste held by players is part of the
-          // dying world's pool — it is LOST in the collapse, so Layer 2
-          // (pool invariant) stays exact on the reset. Balances/upgrades
-          // carry over; stockpiles do not.
-          storageKg: 0,
+          // Sprint 2.11: the forced AFK→locked transition is persisted here.
+          protection: prot,
+          storageKg: held.storage,
           processing: {
-            queuedKg: 0,
+            queuedKg: held.processing,
             since: now,
-            sessionId: undefined,
-            sliceIndex: 0,
+            sessionId: keep ? p.processing.sessionId : undefined,
+            sliceIndex: keep ? p.processing.sliceIndex : 0,
           },
           robot: {
             ...p.robot,
@@ -632,7 +712,9 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
             y: by,
             fromX: bx,
             fromY: by,
-            cargoKg: 0,
+            // Sprint 2.11: sealed bases keep their cargo; everyone else's
+            // cargo dies with the world (Sprint 2.5 consistency).
+            cargoKg: held.cargo,
             battery: batteryCap(p),
           },
         });
@@ -646,6 +728,58 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
         0,
       );
       await addEvent(ctx, newWorldId, "spawn", `World ${newWorldId} seeded — fresh pool unlocked`);
+    }
+
+    // SPRINT 2.11 — Emergency Launch completion (5 real-min countdown; tick
+    // sees launchAt passed). Base −1, Robot −1, launch fee in TOX, treasury
+    // −15% (mock), mock re-entry SOL grant so the loop stays playable.
+    for (const p of players) {
+      const prot = prots.get(p._id)!;
+      if (prot.state !== "launching" || !launchDue(prot.launchAt, now)) continue;
+      const cx = WORLD.MAP_SIZE / 2;
+      treasuryTox = Math.max(0, treasuryTox * (1 - PROTECTION.TREASURY_BURN_FRAC));
+      // the abandoned base's stockpile spills back into the recoverable pool
+      // (Layer 2 stays exact: the mass moves buckets, it does not vanish)
+      collectableKg += p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
+      await ctx.db.patch(p._id, {
+        hasBase: false,
+        baseX: undefined,
+        baseY: undefined,
+        storageKg: 0,
+        processing: { queuedKg: 0, since: now, sessionId: undefined, sliceIndex: 0 },
+        toxBalance: Math.max(0, p.toxBalance - PROTECTION.LAUNCH_FEE_TOX),
+        // MOCK re-entry grant: the launch capsule returns your stake so you
+        // can buy a new base (the 0.1 SOL purchase is itself mock).
+        solBalance: p.solBalance + WORLD.BASE_PRICE_SOL,
+        robot: {
+          state: "idle",
+          x: cx,
+          y: cx,
+          fromX: cx,
+          fromY: cx,
+          departAt: now,
+          targetClusterId: undefined,
+          battery: batteryCap(p),
+          cargoKg: 0,
+          arriveAt: undefined,
+          busyUntil: undefined,
+          auto: true,
+          totalTrips: 0,
+        },
+        protection: {
+          ...prot,
+          state: "normal",
+          lockedAt: undefined,
+          lockReason: undefined,
+          launchAt: undefined,
+        },
+      });
+      await addEvent(
+        ctx,
+        worldId,
+        "launch",
+        "🚀 Emergency Launch — base destroyed (TOX fee + treasury −15%)",
+      );
     }
 
     // Sprint 2.4 harness: waste invariant mass balance (should be ~0 every tick)
@@ -671,6 +805,8 @@ export async function runTick(ctx: MutationCtx, now: number): Promise<void> {
       invariantSkewKg,
       // Sprint 2.6 shard rotation counter
       tickIndex: (world.tickIndex ?? 0) + 1,
+      // Sprint 2.11 — mock world treasury (Emergency Launch −15%)
+      treasuryTox,
     });
 }
 

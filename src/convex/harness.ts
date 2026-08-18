@@ -161,6 +161,9 @@ export const resetWorld = mutation({
           sessionId: undefined,
           sliceIndex: 0,
         },
+        // Sprint 2.11: a clean baseline has no protection state — reset it
+        lastActiveAt: now,
+        protection: { state: "normal" },
         robot: {
           ...p.robot,
           state: "idle",
@@ -283,6 +286,9 @@ export const seedLoad = mutation({
           sliceIndex: 0,
         },
         levels: { cargo: lv, recharge: lv, battery: lv, storage: lv },
+        // Sprint 2.11: load players start NORMAL and active (never instantly AFK)
+        lastActiveAt: now,
+        protection: { state: "normal" },
         robot: {
           state: "idle",
           x: bx,

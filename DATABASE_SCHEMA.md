@@ -56,6 +56,8 @@ Plus `authTables()` system tables: `authAccounts`, `authSessions`,
 | `seedPollutionKg` | number? | pollution at world start (invariant anchor, Sprint 2.4) |
 | `generatedKg` | number? | cumulative generation this cycle (Sprint 2.4) |
 | `invariantSkewKg` | number? | |mass-balance residual| after each tick (Sprint 2.4) |
+| `tickIndex` | number? | monotonic tick counter (shard rotation, Sprint 2.6) |
+| `treasuryTox` | number? | **MOCK** world treasury (Sprint 2.11) — genesis seed 1,000,000 TOX; Emergency Launch burns 15%; gameplay never credits it; NOT a payout rail |
 
 Indexes: none (single doc, fetched with `.first()`).
 
@@ -101,9 +103,11 @@ Index: `by_world` (`worldId`).
 | `totalEarnedSol` | number? | **DEPRECATED (v0.3)** — never written after v0.4 |
 | `toxFromNormal` | number? | lifetime TOX from normal burns |
 | `toxFromZone` | number? | lifetime TOX from Burn Zone burns |
-| `storageKg` | number | waste held at base (zeroed on world collapse — Sprint 2.5) |
+| `storageKg` | number | waste held at base (zeroed on collapse for NORMAL bases; kept for sealed — Sprint 2.5 + 2.11) |
 | `processing` | object | `{ queuedKg, since, sessionId?, sliceIndex? }` — burner queue + idempotency state |
 | `levels` | object | `{ cargo, recharge, battery, storage }` each 1..5 |
+| `lastActiveAt` | number | last player action (epoch ms) — AFK trigger (Sprint 2.11); legacy docs fall back to `_creationTime` |
+| `protection` | object | `{ state: "normal"\|"afk"\|"locked"\|"launching", lockedAt?, lockReason?: "voluntary"\|"collapse", shieldUntil?, launchAt? }` — protection state machine (Sprint 2.11) |
 | `robot` | object | see below |
 
 `robot` embedded object:
@@ -169,4 +173,4 @@ waste unit can never reward twice (normal + Burn Zone included).
 | `transaction` | NOT PRESENT |
 | `rewardOutbox` | NOT PRESENT — relevant only when a real SOL payout rail is added (TOX burn rewards are already ledgered) |
 | `upgrade` | NOT PRESENT (embedded in `players.levels`) |
-| `protection` (Base Lock / AFK / Shield / Emergency Launch) | NOT PRESENT |
+| `protection` (Base Lock / AFK / Shield / Emergency Launch) | `players.protection` + `players.lastActiveAt` (Sprint 2.11) — full state machine; design: `TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1.md` |

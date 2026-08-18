@@ -1,8 +1,15 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import type { Doc } from "@/convex/_generated/dataModel";
 import type { UpgradeTrack } from "@/convex/gameParams";
-import { BURN_ZONE_MULTIPLIER, REPLENISHMENT, TOX_PER_TON, UPGRADES, WORLD } from "@/convex/gameParams";
+import {
+  BURN_ZONE_MULTIPLIER,
+  PROTECTION,
+  REPLENISHMENT,
+  TOX_PER_TON,
+  UPGRADES,
+  WORLD,
+} from "@/convex/gameParams";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -11,8 +18,12 @@ import {
   Battery,
   Coins,
   Flame,
+  Lock,
   Package,
   RefreshCw,
+  Rocket,
+  ShieldCheck,
+  Timer,
   Trash2,
   Trophy,
   Warehouse,
@@ -82,6 +93,11 @@ export function Panels({
   onToggleAuto,
   onQueueProcessing,
   onUpgrade,
+  onLockBase,
+  onUnlockBase,
+  onActivateShield,
+  onLaunchBase,
+  onCancelLaunch,
 }: {
   me: Player | null | undefined;
   world: WorldPanelState | undefined;
@@ -90,6 +106,12 @@ export function Panels({
   onToggleAuto: () => void;
   onQueueProcessing: () => void;
   onUpgrade: (track: UpgradeTrack) => void;
+  // Sprint 2.11 — protection systems
+  onLockBase: () => void;
+  onUnlockBase: () => void;
+  onActivateShield: () => void;
+  onLaunchBase: () => void;
+  onCancelLaunch: () => void;
 }) {
   const w = world?.world;
   const frac = w ? w.pollutionKg / w.capacityKg : 0;
@@ -99,10 +121,35 @@ export function Panels({
     Math.max(REPLENISHMENT.MIN_FRAC, REPLENISHMENT.BASE_FRAC * ratio),
   );
 
+  // live clock for protection countdowns (AFK / shield / launch)
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   const storageCap = me ? UPGRADES.storage.caps[me.levels.storage - 1] : 0;
   const cargoCap = me ? UPGRADES.cargo.caps[me.levels.cargo - 1] : 0;
   const batteryCap = me ? UPGRADES.battery.caps[me.levels.battery - 1] : 0;
   const queued = me?.processing.queuedKg ?? 0;
+
+  // Sprint 2.11 — protection state (legacy docs read as NORMAL)
+  const prot = me?.protection ?? { state: "normal" as const };
+  const sealed = prot.state === "locked" || prot.state === "launching";
+  const afk = prot.state === "afk";
+  const launching = prot.state === "launching";
+  const locked = prot.state === "locked";
+  const idleMs = me
+    ? Math.max(0, PROTECTION.AFK_AFTER_MS - (now - (me.lastActiveAt ?? me._creationTime)))
+    : 0;
+  const shieldMsLeft = prot.shieldUntil ? Math.max(0, prot.shieldUntil - now) : 0;
+  const launchMsLeft = prot.launchAt ? Math.max(0, prot.launchAt - now) : 0;
+  const hms = (ms: number) => {
+    const s = Math.ceil(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+  };
 
   const toxLifetime = (me?.toxFromNormal ?? 0) + (me?.toxFromZone ?? 0);
 
@@ -119,11 +166,12 @@ export function Panels({
   const zoneUntil = world?.zone?.expiresAt ?? 0;
 
   return (
-    <Tabs defaultValue="base" className="flex h-full flex-col">
-      <TabsList className="grid w-full grid-cols-4">
+    <Tabs defaultValue={sealed ? "defense" : "base"} className="flex h-full flex-col">
+      <TabsList className="grid w-full grid-cols-5">
         <TabsTrigger value="base">Base</TabsTrigger>
         <TabsTrigger value="robot">Robot</TabsTrigger>
         <TabsTrigger value="upgrades">Upgrades</TabsTrigger>
+        <TabsTrigger value="defense">Defense</TabsTrigger>
         <TabsTrigger value="world">World</TabsTrigger>
       </TabsList>
 
@@ -152,14 +200,17 @@ export function Panels({
           <Button
             variant="outline"
             className="mt-3 w-full cursor-pointer gap-2"
-            disabled={!me?.hasBase || (me?.storageKg ?? 0) <= 0}
+            disabled={sealed || !me?.hasBase || (me?.storageKg ?? 0) <= 0}
+            title={sealed ? "Base is sealed — unlock it first" : undefined}
             onClick={onQueueProcessing}
           >
             <Flame className="size-4" />
             Process all stored waste
           </Button>
           <p className="mt-2 text-center font-mono text-[10px] text-muted-foreground">
-            burn rate 2 kg/s · only burning removes waste from the world
+            {sealed
+              ? "sealed base — the existing burn queue keeps running, new processing is locked"
+              : "burn rate 2 kg/s · only burning removes waste from the world"}
           </p>
         </div>
 
@@ -274,6 +325,7 @@ export function Panels({
             <Switch
               checked={me?.robot.auto ?? true}
               onCheckedChange={onToggleAuto}
+              disabled={sealed}
               className="cursor-pointer"
             />
           </div>
@@ -326,7 +378,8 @@ export function Panels({
                 <Button
                   size="sm"
                   variant={maxed ? "outline" : "default"}
-                  disabled={maxed || (me?.toxBalance ?? 0) < cost}
+                  disabled={maxed || sealed || (me?.toxBalance ?? 0) < cost}
+                  title={sealed ? "Base is sealed — unlock it first" : undefined}
                   className="cursor-pointer gap-1.5"
                   onClick={() => onUpgrade(track)}
                 >
@@ -344,8 +397,166 @@ export function Panels({
         <p className="px-1 font-mono text-[10px] leading-4 text-muted-foreground">
           TOX is earned only by burning waste ({TOX_PER_TON} TOX / t,{" "}
           {Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} TOX / t inside an active Burn Zone). Cargo
-          &amp; recharge prices follow Design Freeze v0.3 (unchanged in v0.4); storage &amp; battery remain
-          P1 — open to rebalance after playtests.
+          &amp; recharge prices follow Design Freeze v0.3 (unchanged in v0.4); storage &amp; battery
+          rebalanced in Sprint 2.10.
+        </p>
+      </TabsContent>
+
+      {/* DEFENSE — Sprint 2.11 protection systems */}
+      <TabsContent value="defense" className="mt-3 flex-1 space-y-4 overflow-y-auto pr-1">
+        {/* STATUS */}
+        <div className="rounded-lg border border-border bg-card/70 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="flex items-center gap-2 font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">
+              <ShieldCheck className="size-4 text-primary" /> BASE STATUS
+            </h3>
+            <Badge
+              variant="outline"
+              className={`font-mono text-[10px] ${
+                sealed
+                  ? "border-red-500/60 text-red-400"
+                  : afk
+                    ? "border-yellow-400/60 text-yellow-300"
+                    : "border-primary/40 text-primary"
+              }`}
+            >
+              {launching
+                ? `LAUNCHING · ${hms(launchMsLeft)}`
+                : locked
+                  ? `LOCKED · ${prot.lockReason === "collapse" ? "COLLAPSE" : "VOLUNTARY"}`
+                  : afk
+                    ? "AFK"
+                    : "NORMAL"}
+            </Badge>
+          </div>
+          <div className="mt-3 space-y-1.5 text-xs text-muted-foreground">
+            {locked && (
+              <p className="rounded-md border border-red-500/30 bg-red-500/5 px-2 py-1.5 text-red-300">
+                🔒 Base sealed{" "}
+                {prot.lockReason === "collapse"
+                  ? "automatically by the world collapse — your stockpile survived."
+                  : "manually — generation stopped, robot parked, stockpile protected."}{" "}
+                The existing burn queue keeps running.
+              </p>
+            )}
+            {launching && (
+              <p className="rounded-md border border-yellow-400/30 bg-yellow-400/5 px-2 py-1.5 text-yellow-300">
+                🚀 Emergency Launch in {hms(launchMsLeft)} — when it completes the base and robot
+                are destroyed ({PROTECTION.LAUNCH_FEE_TOX} TOX + 15% treasury). Cancel is free.
+              </p>
+            )}
+            {!sealed && !afk && me?.hasBase && (
+              <p className="rounded-md border border-border/60 bg-background/50 px-2 py-1.5">
+                <Timer className="mr-1 inline size-3" />
+                AFK protection in <span className="font-mono text-foreground">{hms(idleMs)}</span> —
+                after 12 h of inactivity your base auto-locks at the next world collapse and keeps its
+                stockpile.
+              </p>
+            )}
+            {afk && me?.hasBase && (
+              <p className="rounded-md border border-yellow-400/30 bg-yellow-400/5 px-2 py-1.5 text-yellow-300">
+                ⚠ Base is AFK (12 h idle). It still generates and collects on autopilot, but at the next
+                world collapse it auto-locks — any action brings it back to NORMAL.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* LOCK / LAUNCH */}
+        <div className="rounded-lg border border-border bg-card/70 p-4">
+          <h3 className="flex items-center gap-2 font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">
+            <Lock className="size-4 text-red-400" /> BASE LOCK / EMERGENCY LAUNCH
+          </h3>
+          {!sealed && (
+            <>
+              <Button
+                variant="outline"
+                className="mt-3 w-full cursor-pointer gap-2"
+                disabled={!me?.hasBase}
+                onClick={onLockBase}
+              >
+                <Lock className="size-4" />
+                Lock base (free)
+              </Button>
+              <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+                Seals your base: generation off, robot parked, storage/cargo preserved through world
+                collapse. Unlocking costs {PROTECTION.UNLOCK_COST_TOX} TOX.
+              </p>
+            </>
+          )}
+          {locked && (
+            <>
+              <Button
+                className="mt-3 w-full cursor-pointer gap-2"
+                disabled={(me?.toxBalance ?? 0) < PROTECTION.UNLOCK_COST_TOX}
+                onClick={onUnlockBase}
+              >
+                <Lock className="size-4" />
+                Unlock base — {PROTECTION.UNLOCK_COST_TOX} TOX
+              </Button>
+              <Button
+                variant="destructive"
+                className="mt-2 w-full cursor-pointer gap-2"
+                disabled={(me?.toxBalance ?? 0) < PROTECTION.LAUNCH_FEE_TOX}
+                onClick={onLaunchBase}
+              >
+                <Rocket className="size-4" />
+                Emergency Launch — {PROTECTION.LAUNCH_FEE_TOX} TOX + 15% treasury
+              </Button>
+              <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+                Launch destroys the base and robot in {Math.round(PROTECTION.LAUNCH_WINDOW_MS / 60000)}{" "}
+                min but you keep your TOX and get a re-entry grant. Costs are charged at completion;
+                cancel is free.
+              </p>
+            </>
+          )}
+          {launching && (
+            <Button
+              variant="outline"
+              className="mt-3 w-full cursor-pointer gap-2"
+              onClick={onCancelLaunch}
+            >
+              <Rocket className="size-4" />
+              Cancel launch (free)
+            </Button>
+          )}
+        </div>
+
+        {/* TOXIC SHIELD */}
+        <div className="rounded-lg border border-border bg-card/70 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="flex items-center gap-2 font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">
+              <ShieldCheck className="size-4 text-sky-400" /> TOXIC SHIELD
+            </h3>
+            <Badge
+              variant="outline"
+              className={`font-mono text-[10px] ${
+                shieldMsLeft > 0 ? "border-sky-400/60 text-sky-300" : "text-muted-foreground"
+              }`}
+            >
+              {shieldMsLeft > 0 ? `ACTIVE · ${hms(shieldMsLeft)}` : "INACTIVE"}
+            </Badge>
+          </div>
+          <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+            While the world is CRITICAL (≥90%), an unshielded robot drains battery ×
+            {PROTECTION.CRITICAL_DRAIN_MULT} in the field. A shield makes you immune for{" "}
+            {Math.round(PROTECTION.SHIELD_DURATION_MS / 3_600_000)} h. It never stops the world from
+            collapsing.
+          </p>
+          <Button
+            variant="outline"
+            className="mt-3 w-full cursor-pointer gap-2"
+            disabled={sealed || !me?.hasBase || (me?.toxBalance ?? 0) < PROTECTION.SHIELD_COST_TOX}
+            onClick={onActivateShield}
+          >
+            <ShieldCheck className="size-4" />
+            Activate shield — {PROTECTION.SHIELD_COST_TOX} TOX
+          </Button>
+        </div>
+
+        <p className="px-1 font-mono text-[10px] leading-4 text-muted-foreground">
+          PROTECTION v0.1 — costs/durations are [PLAYTEST] placeholders
+          (TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1.md). Treasury −15% is a mock world vault.
         </p>
       </TabsContent>
 
@@ -412,6 +623,11 @@ export function Panels({
             />
             <StatRow label="Burned (cycle)" value={fmtKg(w?.burnedKg ?? 0)} />
             <StatRow label="Active clusters" value={`${world?.clusterCount ?? 0}`} />
+            <StatRow
+              label="Treasury (mock)"
+              value={`${fmtTox(w?.treasuryTox ?? 0)} TOX`}
+              accent="text-muted-foreground"
+            />
           </div>
           <p className="mt-2 border-t border-border/60 pt-2 font-mono text-[10px] leading-4 text-muted-foreground">
             MODEL C: repl = clip(0.05 × demand/generation, 5%, 9%) · clusters 150–900 kg · allocation =

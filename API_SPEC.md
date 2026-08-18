@@ -109,8 +109,46 @@ Convex Auth HTTP routes.
 - Auth: required
 - Effect: validates TOX balance against `UPGRADES[track].costs[level]`, deducts
   TOX, increments level; battery upgrade tops up battery by the cap delta
-- Errors: `"Max level reached"`, `"Need N TOX"`
+- Errors: `"Max level reached"`, `"Need N TOX"`, `"Base is sealed…"` (Sprint 2.11)
 - Returns: `{ ok, level }`
+
+### `api.game.lockBase` — src/convex/game.ts (Sprint 2.11)
+- Args: `{}` · Auth: required · Free
+- Effect: `normal|afk` → `locked` (`lockReason="voluntary"`). Recalls the robot
+  to base (idle, cargo kept, reservation released by the next tick's cleanup).
+  While sealed: generation off, robot parked, stockpile preserved across
+  collapse, existing burn queue keeps running.
+- Errors: `"Buy a base first"`, `"Base is already sealed"`
+- Returns: `{ ok, state: "locked" }`
+
+### `api.game.unlockBase` — src/convex/game.ts (Sprint 2.11)
+- Args: `{}` · Auth: required
+- Effect: `locked` → `normal` for `PROTECTION.UNLOCK_COST_TOX` (200). The
+  sealed incinerator keeps burning, so the fee is always earnable.
+- Errors: `"Base is not locked"`, `"Unlock costs 200 TOX"`
+- Returns: `{ ok, state: "normal" }`
+
+### `api.game.activateShield` — src/convex/game.ts (Sprint 2.11)
+- Args: `{}` · Auth: required
+- Effect: sets `protection.shieldUntil = now + 2 h` for `150 TOX` (re-buying
+  refreshes). While the world is CRITICAL, unshielded field robots drain ×2;
+  the shield never prevents world collapse.
+- Errors: `"Shield costs 150 TOX"`, `"Base is sealed…"`
+- Returns: `{ ok, shieldUntil }`
+
+### `api.game.launchBase` — src/convex/game.ts (Sprint 2.11)
+- Args: `{}` · Auth: required
+- Effect: `locked` → `launching` with `launchAt = now + 5 min`. Fees (300 TOX
+  + 15% mock treasury) are charged at COMPLETION by the tick; the base stays
+  sealed during the countdown.
+- Errors: `"Only a locked base can launch"`, `"Launch needs 300 TOX…"`
+- Returns: `{ ok, launchAt }`
+
+### `api.game.cancelLaunch` — src/convex/game.ts (Sprint 2.11)
+- Args: `{}` · Auth: required
+- Effect: `launching` → `locked` (free; nothing was charged yet).
+- Errors: `"No launch in progress"`
+- Returns: `{ ok, state: "locked" }`
 
 ### `api.world.tick` — src/convex/world.ts
 - Args: `{}`

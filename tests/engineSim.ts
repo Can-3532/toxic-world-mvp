@@ -1,13 +1,19 @@
-// TOXIC WORLD — deterministic headless oracle simulator (Sprint 2.4 → 2.6).
+// TOXIC WORLD — deterministic headless oracle simulator (Sprint 2.4 → 2.11).
 //
 // Mirrors the production world tick (`src/convex/world.ts`) step-for-step
 // using the SAME pure functions the tick calls (`engine.ts`, `economy.ts`,
-// `gameParams.ts`), so the headless tests validate the real production math —
-// not a copy. Uses a seeded RNG so every scenario is reproducible.
+// `gameParams.ts`, `protection.ts`), so the headless tests validate the real
+// production math — not a copy. Uses a seeded RNG so every scenario is
+// reproducible.
 //
 // Deliberately NOT imported by any Convex function; runs under `bun test`
-// only. Mirrors world.ts as of Sprint 2.6, including the sharded robot and
-// burn loops (WORLD.ROBOTS_PER_TICK).
+// only. Mirrors world.ts as of Sprint 2.11, including the sharded robot and
+// burn loops (WORLD.ROBOTS_PER_TICK) and the protection systems.
+//
+// Sprint 2.11 additions: players carry `protection` + `lastActiveAt`.
+// DEFAULT lastActiveAt is Number.MAX_SAFE_INTEGER (never AFK) so all
+// pre-2.11 scenarios behave byte-for-byte as before; protection tests pass
+// explicit lastActiveAt / protection values.
 
 import {
   batchAllocation,
@@ -24,11 +30,22 @@ import {
 import {
   BURN_ZONE,
   BURN_ZONE_MULTIPLIER,
+  PROTECTION,
   ROBOT,
   UPGRADES,
   WORLD,
   batteryForTrip,
 } from "../src/convex/gameParams";
+import {
+  applyIdleCheck,
+  collapseSeed,
+  drainMultiplier,
+  isSealed,
+  keepsHeldOnCollapse,
+  launchDue,
+  onWorldCollapse,
+  proportionalPreserve,
+} from "../src/convex/protection";
 
 export type RobotState =
   | "idle"
@@ -38,6 +55,15 @@ export type RobotState =
   | "unloading"
   | "recharging";
 export type WorldStatus = "safe" | "critical" | "collapsed";
+export type ProtectionState = "normal" | "afk" | "locked" | "launching";
+
+export interface SimProtection {
+  state: ProtectionState;
+  lockedAt?: number;
+  lockReason?: "voluntary" | "collapse";
+  shieldUntil?: number;
+  launchAt?: number;
+}
 
 export interface SimRobot {
   state: RobotState;
@@ -85,6 +111,9 @@ export interface SimPlayer {
   processing: SimProcessing;
   levels: SimLevels;
   robot: SimRobot;
+  // Sprint 2.11 — protection systems (mirrors players.lastActiveAt + protection)
+  lastActiveAt: number;
+  protection: SimProtection;
 }
 
 export interface SimCluster {
@@ -109,6 +138,8 @@ export interface SimWorld {
   generatedKg: number;
   invariantSkewKg: number;
   tickIndex: number;
+  // Sprint 2.11 — MOCK world treasury (Emergency Launch −15%)
+  treasuryTox: number;
 }
 
 export interface SimZone {
@@ -147,6 +178,9 @@ export interface MakePlayerOptions {
   sol?: number;
   tox?: number;
   worldId?: number;
+  // Sprint 2.11 — protection
+  lastActiveAt?: number;
+  protection?: Partial<SimProtection>;
 }
 
 export function makePlayer(
@@ -191,6 +225,10 @@ export function makePlayer(
       auto: opts.auto ?? true,
       totalTrips: 0,
     },
+    // Sprint 2.11: NEVER AFK unless the test says so (preserves pre-2.11
+    // behavior byte-for-byte; protection tests set these explicitly).
+    lastActiveAt: opts.lastActiveAt ?? Number.MAX_SAFE_INTEGER,
+    protection: { state: "normal", ...opts.protection },
   };
 }
 
@@ -265,6 +303,7 @@ export function makeWorld(opts: MakeWorldOptions = {}): SimWorld {
     generatedKg: 0,
     invariantSkewKg: 0,
     tickIndex: 0,
+    treasuryTox: PROTECTION.TREASURY_SEED_TOX,
   };
 }
 
@@ -404,6 +443,7 @@ export class Sim {
     p: SimPlayer,
     now: number,
     dtReal: number,
+    drainMult: number,
     assignments: Map<string | number, string | number>,
   ): boolean {
     if (!p.hasBase) return false;
@@ -460,7 +500,9 @@ export class Sim {
       case "to_cluster": {
         const target = r.targetClusterId ? this.clusterById(r.targetClusterId) : null;
         const dest = target ?? base;
-        r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal);
+        // Sprint 2.11 toxic shield: critical-state drain multiplier applies to
+        // field operations only (movement + collection), never to recharge.
+        r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
         const total = (r.arriveAt || now) - r.departAt;
         if (total > 0) {
           const t = Math.min(1, (now - r.departAt) / total);
@@ -484,7 +526,7 @@ export class Sim {
         break;
       }
       case "collecting": {
-        r.battery = Math.max(0, r.battery - ROBOT.DRAIN_COLLECTING * dtReal);
+        r.battery = Math.max(0, r.battery - ROBOT.DRAIN_COLLECTING * dtReal * drainMult);
         if (now >= (r.busyUntil || now)) {
           const target = r.targetClusterId ? this.clusterById(r.targetClusterId) : null;
           if (target && target.kg > 0) {
@@ -502,7 +544,7 @@ export class Sim {
         break;
       }
       case "to_base": {
-        r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal);
+        r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
         const total = (r.arriveAt || now) - r.departAt;
         if (total > 0) {
           const t = Math.min(1, (now - r.departAt) / total);
@@ -547,12 +589,25 @@ export class Sim {
     const w = this.world;
     const players = this.players;
 
-    // 1) base generation → pollution
+    // Sprint 2.11 — protection states (mirrors world.ts): idle check first;
+    // default lastActiveAt MAX_SAFE_INTEGER means pre-2.11 players never AFK.
+    for (const p of players) {
+      const base = p.protection ?? { state: "normal" as ProtectionState };
+      p.protection = p.hasBase
+        ? applyIdleCheck(base, p.lastActiveAt, now)
+        : base;
+    }
+
+    // 1) base generation → pollution. Sealed bases emit nothing; AFK bases
+    // stay on autopilot.
     const active = players.filter((p) => p.hasBase);
-    const genKgH = active.length * WORLD.BASE_GEN_KG_H;
+    const generating = active.filter((p) => !isSealed(p.protection.state));
+    const genKgH = generating.length * WORLD.BASE_GEN_KG_H;
     let pollutionKg = Math.min(w.capacityKg, w.pollutionKg + genKgH * TICK_GAME_H);
     let generatedKg = w.generatedKg + genKgH * TICK_GAME_H;
     let seedPollutionKg = w.seedPollutionKg;
+    // Toxic Shield: critical at the robot phase (post-generation, pre-burn)
+    const criticalNow = pollutionKg / w.capacityKg >= WORLD.CRITICAL_FRAC;
 
     // 2) robots — sharded (Sprint 2.6)
     const shardCount = Math.max(1, Math.ceil(players.length / WORLD.ROBOTS_PER_TICK));
@@ -564,6 +619,7 @@ export class Sim {
         ({ p, i }) =>
           i % shardCount === shardIndex &&
           p.hasBase &&
+          !isSealed(p.protection.state) && // sealed robots are parked
           p.robot.auto &&
           p.robot.state === "idle" &&
           p.robot.cargoKg < this.cargoCap(p),
@@ -588,11 +644,15 @@ export class Sim {
     let demandKgH = 0;
     for (let i = 0; i < players.length; i++) {
       const p = players[i];
+      const sealed = isSealed(p.protection.state);
       if (i % shardCount !== shardIndex) {
-        if (robotDemands(p.robot.state)) demandKgH += WORLD.DEMAND_REF_KG_H;
+        // unstepped this tick: a frozen mid-trip robot still generates demand
+        if (!sealed && robotDemands(p.robot.state)) demandKgH += WORLD.DEMAND_REF_KG_H;
         continue;
       }
-      const isActive = this.stepRobot(p, now, dtReal, assignments);
+      if (sealed) continue; // parked — no movement, no demand, no drain
+      const drainMult = drainMultiplier(p.protection, now, criticalNow);
+      const isActive = this.stepRobot(p, now, dtReal, drainMult, assignments);
       if (isActive) demandKgH += WORLD.DEMAND_REF_KG_H;
     }
 
@@ -623,7 +683,9 @@ export class Sim {
     // 5) burn zone lifecycle
     const zoneActive = this.stepZone(now);
 
-    // 6) processing / burning → TOX-only rewards (v0.4, sharded in 2.6)
+    // 6) processing / burning → TOX-only rewards (v0.4, sharded in 2.6).
+    // Sprint 2.11: sealed bases KEEP burning their existing queue (the unlock
+    // fee stays earnable — no deadlock); only new processing is blocked.
     let burnedKg = w.burnedKg;
     for (let i = 0; i < players.length; i++) {
       const p = players[i];
@@ -665,26 +727,51 @@ export class Sim {
       }
     }
 
-    // 7) status / collapse
+    // 7) status / collapse — Sprint 2.11 protection-aware
     let status = worldStatus(pollutionKg, w.capacityKg);
     let newWorldId = w.worldId;
     if (pollutionKg >= w.capacityKg) {
       newWorldId = w.worldId + 1;
       this.clusters = [];
-      pollutionKg = w.capacityKg * WORLD.RESET_POLLUTION_FRAC;
-      collectableKg = pollutionKg * WORLD.INITIAL_COLLECTABLE_FRAC;
-      hiddenKg = pollutionKg - collectableKg;
       status = "safe";
-      // re-anchor the waste invariant for the new world cycle (mirrors world.ts)
+      // AFK bases auto-lock (keep stockpile); LOCKED/LAUNCHING keep theirs;
+      // NORMAL bases are wiped. Preserved holdings are subtracted from the
+      // seeded recoverable pool so both invariants stay EXACT.
+      let carriedKg = 0;
+      for (const p of players) {
+        const prot = p.hasBase ? onWorldCollapse(p.protection, now) : p.protection;
+        p.protection = prot;
+        if (p.hasBase && keepsHeldOnCollapse(prot.state)) {
+          carriedKg += p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
+        }
+      }
+      const seed = collapseSeed(w.capacityKg, carriedKg);
+      pollutionKg = seed.pollutionKg;
+      hiddenKg = seed.hiddenKg;
+      collectableKg = seed.collectableKg;
+      // re-anchor the waste invariant for the new world cycle
       burnedKg = 0;
       generatedKg = 0;
       seedPollutionKg = pollutionKg;
       for (const p of players) {
         const bx = p.baseX;
         const by = p.baseY;
+        const keep = p.hasBase && keepsHeldOnCollapse(p.protection.state);
+        const held = keep
+          ? proportionalPreserve(carriedKg, seed.preservedKg, {
+              storage: p.storageKg,
+              cargo: p.robot.cargoKg,
+              processing: p.processing.queuedKg,
+            })
+          : { storage: 0, cargo: 0, processing: 0 };
         p.worldId = newWorldId;
-        p.storageKg = 0;
-        p.processing = { queuedKg: 0, since: now, sessionId: null, sliceIndex: 0 };
+        p.storageKg = held.storage;
+        p.processing = {
+          queuedKg: held.processing,
+          since: now,
+          sessionId: keep ? p.processing.sessionId : null,
+          sliceIndex: keep ? p.processing.sliceIndex : 0,
+        };
         p.robot = {
           ...p.robot,
           state: "idle",
@@ -693,7 +780,7 @@ export class Sim {
           y: by,
           fromX: bx,
           fromY: by,
-          cargoKg: 0,
+          cargoKg: held.cargo,
           battery: this.batteryCap(p),
         };
       }
@@ -702,6 +789,51 @@ export class Sim {
         WORLD.ACTIVE_CLUSTER_TARGET,
         0,
       );
+    }
+
+    // Sprint 2.11 — Emergency Launch completion: Base −1, Robot −1, fee TOX,
+    // treasury −15% (mock), mock re-entry SOL grant.
+    for (const p of players) {
+      if (
+        p.protection.state !== "launching" ||
+        !launchDue(p.protection.launchAt, now)
+      ) {
+        continue;
+      }
+      const cx = WORLD.MAP_SIZE / 2;
+      w.treasuryTox = Math.max(0, w.treasuryTox * (1 - PROTECTION.TREASURY_BURN_FRAC));
+      // the abandoned base's stockpile spills back into the recoverable pool
+      // (Layer 2 stays exact: the mass moves buckets, it does not vanish)
+      collectableKg += p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
+      p.hasBase = false;
+      p.baseX = cx;
+      p.baseY = cx;
+      p.storageKg = 0;
+      p.processing = { queuedKg: 0, since: now, sessionId: null, sliceIndex: 0 };
+      p.toxBalance = Math.max(0, p.toxBalance - PROTECTION.LAUNCH_FEE_TOX);
+      p.solBalance = p.solBalance + WORLD.BASE_PRICE_SOL;
+      p.robot = {
+        state: "idle",
+        x: cx,
+        y: cx,
+        fromX: cx,
+        fromY: cx,
+        departAt: now,
+        targetClusterId: null,
+        battery: this.batteryCap(p),
+        cargoKg: 0,
+        arriveAt: 0,
+        busyUntil: 0,
+        auto: true,
+        totalTrips: 0,
+      };
+      p.protection = {
+        ...p.protection,
+        state: "normal",
+        lockedAt: undefined,
+        lockReason: undefined,
+        launchAt: undefined,
+      };
     }
 
     const invariantSkewKg = Math.abs(

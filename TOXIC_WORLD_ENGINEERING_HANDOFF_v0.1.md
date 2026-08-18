@@ -1,4 +1,4 @@
-# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7/2.8, recalibration SPRINT 2.9)
+# TOXIC WORLD — ENGINEERING HANDOFF v0.1 (economy DESIGN FREEZE v0.4, engine SPRINT 2.5, tick SPRINT 2.7/2.8, recalibration SPRINT 2.9, protection SPRINT 2.11)
 
 Verified against the repository on disk (Freebuff Web / Vly sandbox).
 Everything below is grounded in actual files; anything not in the repo is
@@ -195,7 +195,7 @@ New harness tools: `harness:seedLoad`, `harness:tickOnce` (unguarded, returns en
 | `src/pages/NotFound.tsx` | 404 | Page | ACTIVE | — | route `*` |
 | `src/pages/Dashboard.tsx` | Template starter dashboard | **UNUSED leftover** (not routed) | STALE | — | none |
 | `src/components/game/WorldMap.tsx` | Map: clusters, base, animated robot | Component | ACTIVE | `api.world.clusters`, gameParams | Game |
-| `src/components/game/Panels.tsx` | Base/Robot/Upgrades/World tabs | Component | ACTIVE | gameParams, queries | Game |
+| `src/components/game/Panels.tsx` | Base/Robot/Upgrades/Defense/World tabs | Component | ACTIVE | gameParams, queries | Game |
 | `src/components/game/format.ts` | Display formatters | Utility | ACTIVE | — | Game, Panels, WorldMap |
 | `src/components/RequireAuth.tsx` | Route guard → `/auth?returnTo=` | Component | ACTIVE | `useAuth` | main.tsx |
 | `src/components/LogoDropdown.tsx` | Template logo menu | **UNUSED leftover** | STALE | — | none |
@@ -270,8 +270,9 @@ Legend: STATUS = implemented in code; REAL/MOCK = simulation vs external; TESTED
 | SOL ledger | `game.ts` | `solBalance` — base purchase only, burn never writes it | DONE | **MOCK (off-chain)** | — |
 | Base purchase | `game.ts` | `buyBase` (0.1 SOL, deducts mock balance) | DONE | **MOCK (no tx)** | as above |
 
-Runtime behavior of the engine is **NOT VERIFIED** beyond compile/deploy: there is
-no test harness executing ticks and asserting invariants in this repo.
+Runtime behavior is verified by the headless harness (`tests/` — 115 tests,
+including the 10k-scale sim; `bun test tests/`) plus the Sprint 2.6 live-DB
+runs; see §10.
 
 ---
 
@@ -294,7 +295,7 @@ no test harness executing ticks and asserting invariants in this repo.
 | Storage | `Panels.tsx` Base tab | /game | `api.game.me` | REAL | DONE | — |
 | Processing | `Panels.tsx` Base tab | /game | `api.game.me`, `queueProcessing` | REAL | DONE | — |
 | Upgrades | `Panels.tsx` Upgrades tab | /game | `gameParams` + `api.game.upgrade` | REAL | DONE | — |
-| Protection systems (Lock/AFK/Shield/Emergency) | — | — | — | — | **NOT IMPLEMENTED** | — |
+| Protection systems (Lock/AFK/Shield/Emergency) | `Panels.tsx` Defense tab, `Game.tsx` banner | /game | `api.game.me` (`protection`/`lastActiveAt`), `worldState.status` | REAL (server-state machine: `protection.ts` + `world.ts` + `game.ts`) | DONE (Sprint 2.11) | §10 protection suite + typecheck |
 | Event feed | `Panels.tsx` World tab | /game | `api.world.events` (reactive; **not WebSocket**) | REAL | DONE | — |
 | Critical/collapse UI | `Game.tsx` banner + overlay | /game | `worldState.status` | REAL | DONE | — |
 | Leaderboard | `Panels.tsx` World tab | /game | `api.game.leaderboard` | REAL | DONE | — |
@@ -342,7 +343,7 @@ See `DATABASE_SCHEMA.md` (deliverable) and `src/convex/schema.ts`.
 | ProcessingJob | (embedded) | YES | `players.processing` |
 | Transaction | — | **NOT PRESENT** | |
 | Upgrade | (embedded) | YES | `players.levels` |
-| Protection | — | **NOT PRESENT** | |
+| Protection | (embedded) | YES | `players.protection` + `players.lastActiveAt` (Sprint 2.11) |
 | Reward Outbox | — | **NOT PRESENT** | **critical gap for real settlement** |
 
 ---
@@ -420,10 +421,10 @@ remain only as DEPRECATED legacy aliases.)
 | Recharge costs | 20/30/45/65 | gameParams | `UPGRADES.recharge.costs` | FREEZE |
 | Storage costs | 120/190/300/460 | gameParams | `UPGRADES.storage.costs` | **FROZEN P1 v0.1 (Sprint 2.10)** — was 200/320/500/760 placeholder |
 | Battery costs | 100/160/250/400 | gameParams | `UPGRADES.battery.costs` | **FROZEN P1 v0.1 (Sprint 2.10)** — was 120/190/300/470 placeholder |
-| Base Lock | — | — | — | NOT IMPLEMENTED |
-| AFK Protection | — | — | — | NOT IMPLEMENTED |
-| Toxic Shield | — | — | — | NOT IMPLEMENTED |
-| Emergency Launch | — | — | — | NOT IMPLEMENTED |
+| Base Lock | 200 TOX unlock | `PROTECTION` / `game.ts:lockBase,unlockBase` | **FROZEN v0.1 (Sprint 2.11)** — free to seal; generation off, robot parked, stockpile survives collapse; existing burn queue continues |
+| AFK Protection | 12 real h idle → auto-lock at collapse | `protection.ts:applyIdleCheck,onWorldCollapse` / `world.ts` | **FROZEN v0.1 (Sprint 2.11)** — AFK keeps generating/collecting; stockpile preserved |
+| Toxic Shield | 150 TOX / 2 real h; ×2 critical drain for unshielded | `protection.ts:drainMultiplier` / `game.ts:activateShield` | **FROZEN v0.1 (Sprint 2.11)** — never prevents collapse |
+| Emergency Launch | 300 TOX + treasury −15% (mock) / 5 min | `game.ts:launchBase,cancelLaunch` / `world.ts` | **FROZEN v0.1 (Sprint 2.11)** — Base −1, Robot −1, re-entry grant; stockpile returns to pool |
 
 ---
 
@@ -433,6 +434,7 @@ remain only as DEPRECATED legacy aliases.)
 |---|---|---|---|---|---|
 | v0.4 reward formulas (26 tests) | `tests/economy.test.ts` | `bun test tests/economy.test.ts` | 500/600 TOX per ton, fractions, idempotency keys + `advanceBurn` duplicate-slice contract, no-SOL path, pollution 1:1, starter 460 TOX/day, cargo progression times | **26 PASS / 0 FAIL** | Sprint 2.6 continuation |
 | Storage/Battery rebalance (10 tests) | `tests/storageBatteryValidation.test.ts` | `bun test tests/storageBatteryValidation.test.ts` | battery/recharge/storage/cargo axis sweeps (recharge share, stall share, throughput), rebalanced cost pins, priority order, progression ROI, sink ratio | **10 PASS / 0 FAIL** | Sprint 2.10 |
+| Protection systems (23 tests) | `tests/protectionValidation.test.ts` | `bun test tests/protectionValidation.test.ts` | Lock (generation off, batch-excluded, queue keeps burning), AFK (12 h boundary, autopilot, auto-lock at collapse), Shield (critical ×2 drain, shielded ×1, safe ×1), Launch (completion destroys base, fee + treasury −15%, stockpile→pool, invariants exact), collapse keep/wipe matrix + carried-mass accounting | **23 PASS / 0 FAIL** | Sprint 2.11 |
 | Engine harness (29 tests) | `tests/engine.test.ts` + `tests/engineSim.ts` | `bun test tests/engine.test.ts` | two-layer invariant every tick, pollution %, Model C, Batch/Reservation (floor access, no dup, determinism, prod==reference), burn reward normal/zone, idempotency, collapse+reset, critical recovery, active/inactive scaling, scale 10→10k | **29 PASS / 0 FAIL** (134 assertions) | Sprint 2.6 continuation |
 | Convex codegen + deploy | — | `bunx convex dev --once` | functions compile & deploy to dev | **PASS** (exit 0) | this turn |
 | Whole-project typecheck | — | `bunx tsc -b --noEmit` | TS across frontend + backend | **PASS** (exit 0) | this turn |
@@ -492,6 +494,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | Cargo costs 150/225/340/510 | `UPGRADES.cargo.costs` | ✅ | |
 | Recharge costs 20/30/45/65 | `UPGRADES.recharge.costs` | ✅ | |
 | Storage/Battery costs | `UPGRADES.storage/battery.costs` | ✅ (Sprint 2.10) | P1 open item resolved: rebalanced 120/190/300/460 + 100/160/250/400 from measured track value (rebalance doc v0.1) |
+| Protection systems (Lock/AFK/Shield/Launch) | `protection.ts` + `world.ts` §2/§7 + `game.ts` + Defense tab | ✅ (Sprint 2.11) | design freeze v0.1 (`TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1.md`); costs [PLAYTEST]; treasury MOCK |
 | Critical = 90% | `CRITICAL_FRAC`, `tick` §6 | ✅ | |
 | Collapse = 100% | `tick` §6 | ✅ | |
 | No collapse countdown | `tick` §6 | ✅ | immediate reset |
@@ -517,7 +520,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | Frontend | DONE (landing + game) |
 | Auth | DONE (email OTP + anonymous) |
 | Solana | NOT IMPLEMENTED — MOCK ONLY |
-| Economy | DONE for v0.4 (TOX-only rewards, Burn Zones, ledgered; storage/battery costs remain P1 placeholders) |
+| Economy | DONE for v0.4 (TOX-only rewards, Burn Zones, ledgered) + Sprint 2.10 cost rebalance + Sprint 2.11 protection fees (all [PLAYTEST]) |
 | Reward Settlement | PARTIAL (TOX: real in-database ledger, exactly-once; SOL: none by design — no chain, no outbox) |
 | Multiplayer | PARTIAL (shared world state; NOT load-tested, not verified with concurrent clients) |
 | Production Deployment | NOT CONFIGURED (dev deployment only) |
@@ -529,7 +532,7 @@ Env var names: see §1 and `.env.example`. Real values are never committed.
 | # | TASK | ROLE | DEPENDENCY | OUTPUT | ACCEPTANCE CRITERIA |
 |---|---|---|---|---|---|
 | ~~1~~ ✅ | Storage/Battery P1 rebalance | Economy | — | **DONE (Sprint 2.10)** — `gameParams.ts` + rebalance doc + 10 tests | Storage pressure + progression ROI measured and frozen |
-| 2 | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | schema + tick logic + UI | Each system has test + UI state |
+| ~~2~~ ✅ | Protection systems (Lock/AFK/Shield/Emergency) | Backend | — | **DONE (Sprint 2.11)** — `protection.ts` + schema + tick/mutations + Defense tab + 23 tests | Each system has test + UI state |
 | 3 | Concurrency hardening of `tick` (atomic guard) | Backend | — | atomic CAS or serialized tick | Double-advance impossible under concurrent calls |
 | 4 | Real Solana entry rail (0.1 SOL base purchase) | Backend/Frontend | — | Coinbase Commerce or wallet SDK; server-side verification | Purchase verified on devnet; base granted only on confirmation; burn still pays TOX only |
 | 5 | Performance: spatial bucketing for nearest-cluster | Backend | — | indexed/spatial lookup | 10k-player tick < 2 s |
@@ -577,8 +580,10 @@ A playable single-world MVP on Convex + React with a **v0.4 TOX-only reward
 economy**: server-authoritative spatial robots, global waste pool with Model C
 replenishment, burn → TOX (500/ton, ×1.2 in random server-driven Burn Zones)
 credited exactly-once through a `rewardLedger` table, upgrades, collapse/reset,
-auth, and a themed landing + game UI. The world tick cron fires every 2 s
-(`crons.ts`); SOL exists only as a mock entry balance for the base purchase. No
+auth, Sprint 2.11 protection systems (Base Lock / AFK / Toxic Shield /
+Emergency Launch) with a Defense tab, and a themed landing + game UI. The
+world tick cron fires every 5 s (`crons.ts`); SOL exists only as a mock entry
+balance for the base purchase. No
 blockchain code exists. **Sprint 2.5** made the engine consistent with the
 freeze: the tick plans robot reservations through the same `batchAllocation`
 reference the harness tests (level-ordered floor access, deterministic, no
@@ -586,6 +591,13 @@ duplicate reservation), the two-layer waste invariant (mass + pool) is the
 official accounting and holds live at machine precision, and a clean world
 baseline (`harness:resetWorld`) removed the pre-2.5 seed write-back bug that
 had leaked ~13.5 t of phantom pool mass.
+**Sprint 2.11** added the protection state machine (`normal → afk → locked →
+launching`): sealed bases stop generating, park the robot and keep their
+stockpile through world collapse (AFK bases auto-lock); preserved holdings are
+subtracted from the next world's seeded recoverable pool so both invariant
+layers stay exact; Emergency Launch destroys the base for a TOX fee + 15% of a
+MOCK world treasury. Costs/durations are [PLAYTEST] placeholders
+(`TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1.md`).
 
 ## CRITICAL BLOCKERS
 1. **Dev deployment DISABLED by platform usage limit** (Sprint 2.6 load tests
@@ -604,6 +616,10 @@ had leaked ~13.5 t of phantom pool mass.
    **RESOLVED (Sprint 2.10)** — rebalanced and frozen in
    `TOXIC_WORLD_STORAGE_BATTERY_REBALANCE_v0.1.md`; playtest confirmation is
    the remaining (non-blocking) follow-up.
+6. ~~Protection systems unimplemented.~~ **RESOLVED (Sprint 2.11)** — Lock /
+   AFK / Shield / Emergency Launch implemented end-to-end (schema → tick →
+   mutations → Defense tab → 23 tests). Costs/durations are [PLAYTEST]
+   placeholders; the −15% treasury mechanic runs against a MOCK world vault.
 
 (Resolved in Sprint 2.6: the non-atomic tick guard was verified SAFE under
 concurrency — double-advance cannot occur; no guard fix needed. Continuation
@@ -635,4 +651,7 @@ idempotency-contract fix, both covered by the headless suite.)
    STORAGE_BATTERY_REBALANCE_v0.1.md`, game-h/real-h columns in §4).
    Remaining pre-launch design item: pick `WORLD_COLLAPSE_TARGET` from the
    Sprint 2.9 curve (freeze doc §4).
-4. Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.
+4. ~~Protection systems (Lock/AFK/Shield/Emergency) remain unimplemented.~~
+   **DONE (Sprint 2.11)** — see the SPRINT 2.11 section above; remaining
+   work is playtesting the [PLAYTEST] costs and wiring the mock treasury to
+   a real rail.
