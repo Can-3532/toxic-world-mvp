@@ -267,6 +267,7 @@ export interface PlayerOpts {
   protection?: Protection;
   auto?: boolean;
   cargoKg?: number;
+  levels?: { cargo: number; recharge: number; battery: number; storage: number };
   processing?: {
     queuedKg?: number;
     since?: number;
@@ -302,7 +303,7 @@ export function makePlayer(
       sessionId: opts.processing?.sessionId ?? opts.sessionId,
       sliceIndex: opts.processing?.sliceIndex ?? opts.sliceIndex ?? 0,
     },
-    levels: { cargo: 1, recharge: 1, battery: 1, storage: 1 },
+    levels: opts.levels ?? { cargo: 1, recharge: 1, battery: 1, storage: 1 },
     lastActiveAt: opts.lastActiveAt ?? since,
     protection: opts.protection ?? { state: "normal" },
     robot: {
