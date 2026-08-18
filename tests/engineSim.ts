@@ -1,6 +1,11 @@
-// TOXIC WORLD — Deterministic Engine Simulation Oracle
+// TOXIC WORLD — Deterministic Engine Simulation Oracle (CANONICAL API)
 // Mirrors src/convex/world.ts + engine.ts + economy.ts + protection.ts
 // step-for-step for headless testing without Convex.
+//
+// This is the SINGLE source of truth for all test suites. Every test file
+// (engine.test.ts, economy.test.ts, economyValidation.test.ts,
+// storageBatteryValidation.test.ts, protectionValidation.test.ts,
+// protectionEconomyValidation.test.ts) imports from this module.
 
 import {
   BURN_ZONE,
@@ -14,7 +19,6 @@ import {
 } from "../src/convex/gameParams";
 import {
   type Protection,
-  type ProtectionState,
   isSealed,
   onWorldCollapse,
   keepsHeldOnCollapse,
@@ -28,8 +32,6 @@ import {
   robotDemands,
   worldStatus,
   batchAllocation,
-  type BatchRobot,
-  type BatchCluster,
 } from "../src/convex/engine";
 import {
   computeBurnSlice,
@@ -43,11 +45,11 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface SimCluster {
-  id: string;
+  id: string | number;
   x: number;
   y: number;
   kg: number;
-  reservedBy?: string;
+  reservedBy?: string | number;
 }
 
 export interface SimRobot {
@@ -63,7 +65,7 @@ export interface SimRobot {
   fromX: number;
   fromY: number;
   departAt: number;
-  targetClusterId?: string;
+  targetClusterId?: string | number;
   battery: number;
   cargoKg: number;
   arriveAt?: number;
@@ -73,7 +75,7 @@ export interface SimRobot {
 }
 
 export interface SimPlayer {
-  id: string;
+  id: string | number;
   worldId: number;
   hasBase: boolean;
   baseX: number;
@@ -121,37 +123,18 @@ export interface SimWorld {
   lastTick: number;
 }
 
-export interface SimBurnZone {
-  status: "active" | "inactive";
-  x: number;
-  y: number;
-  spawnedAt: number;
-  expiresAt: number;
-  nextSpawnAt: number;
-}
-
 export interface SimState {
   world: SimWorld;
   players: SimPlayer[];
   clusters: SimCluster[];
-  burnZone: SimBurnZone;
+  burnZone: { status: string; x: number; y: number; nextSpawnAt: number; expiresAt: number };
   ledger: Array<{
-    playerId: string;
+    playerId: string | number;
     key: string;
-    kind: "normal" | "burn_zone";
+    kind: string;
     kg: number;
     tox: number;
-    at: number;
   }>;
-}
-
-export interface TickResult {
-  advanced: boolean;
-  tickMs: number;
-  invariant: { massBalance: number; poolBalance: number };
-  worldStatus: "safe" | "critical" | "collapsed";
-  pollutionPct: number;
-  state: SimState;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +147,16 @@ function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+// Seeded PRNG for deterministic cluster generation across test runs
+let _rngState = 42;
+function seedRng(s: number) { _rngState = s; }
 function rand(min: number, max: number) {
-  return min + Math.random() * (max - min);
+  _rngState = (_rngState * 16807 + 0) % 2147483647;
+  return min + (_rngState / 2147483647) * (max - min);
+}
+function rngFrac() {
+  _rngState = (_rngState * 16807 + 0) % 2147483647;
+  return _rngState / 2147483647;
 }
 
 export function storageCap(p: SimPlayer): number {
@@ -181,17 +172,55 @@ export function batteryCap(p: SimPlayer): number {
 }
 
 // ---------------------------------------------------------------------------
-// Seed functions — matching API expected by existing test suites
+// Seed functions
 // ---------------------------------------------------------------------------
+
+function generateClusters(
+  count: number,
+  totalKg: number,
+): { clusters: SimCluster[]; remainingKg: number } {
+  const clusters: SimCluster[] = [];
+  let remaining = totalKg;
+  for (let i = 0; i < count; i++) {
+    const kg = Math.min(
+      WORLD.CLUSTER_MIN_KG + rand(0, 1) * (WORLD.CLUSTER_MAX_KG - WORLD.CLUSTER_MIN_KG),
+      remaining,
+    );
+    if (kg < WORLD.CLUSTER_MIN_KG) break;
+    clusters.push({
+      id: `c${i}`,
+      x: 100 + rand(0, 1) * 800,
+      y: 100 + rand(0, 1) * 800,
+      kg,
+    });
+    remaining -= kg;
+  }
+  return { clusters, remainingKg: remaining };
+}
 
 /** Create a pristine world at the given pollution fraction. */
 export function freshWorld(
-  capacityKg = WORLD.CAPACITY_KG,
-  pollutionFrac = WORLD.INITIAL_POLLUTION_FRAC,
+  capacityKgOrFrac?: number,
+  pollutionFrac?: number,
 ): SimState {
-  const pollutionKg = capacityKg * pollutionFrac;
+  // Seed RNG at the start of each freshWorld call for deterministic cluster generation
+  seedRng(42);
+  let capacityKg = WORLD.CAPACITY_KG;
+  let frac = WORLD.INITIAL_POLLUTION_FRAC;
+  if (capacityKgOrFrac !== undefined && pollutionFrac !== undefined) {
+    capacityKg = capacityKgOrFrac;
+    frac = pollutionFrac;
+  } else if (capacityKgOrFrac !== undefined) {
+    // Single arg: treat as capacity (backward compat)
+    capacityKg = capacityKgOrFrac;
+    frac = WORLD.INITIAL_POLLUTION_FRAC;
+  }
+  const pollutionKg = capacityKg * frac;
   const collectableKg = pollutionKg * WORLD.INITIAL_COLLECTABLE_FRAC;
-  const { clusters, remainingKg } = generateClusters(WORLD.ACTIVE_CLUSTER_TARGET, collectableKg);
+  const { clusters, remainingKg } = generateClusters(
+    WORLD.ACTIVE_CLUSTER_TARGET,
+    collectableKg,
+  );
   return {
     world: {
       worldId: 0,
@@ -217,36 +246,11 @@ export function freshWorld(
       status: "inactive",
       x: 0,
       y: 0,
-      spawnedAt: 0,
-      expiresAt: 0,
       nextSpawnAt: 60_000,
+      expiresAt: 0,
     },
-    ledger: [] as SimState["ledger"],
+    ledger: [],
   };
-}
-
-function generateClusters(
-  count: number,
-  totalKg: number,
-): { clusters: SimCluster[]; remainingKg: number } {
-  const clusters: SimCluster[] = [];
-  let remaining = totalKg;
-  for (let i = 0; i < count; i++) {
-    const kg = Math.min(
-      WORLD.CLUSTER_MIN_KG +
-        Math.random() * (WORLD.CLUSTER_MAX_KG - WORLD.CLUSTER_MIN_KG),
-      remaining,
-    );
-    if (kg < WORLD.CLUSTER_MIN_KG) break;
-    clusters.push({
-      id: `c${i}`,
-      x: 100 + Math.random() * 800,
-      y: 100 + Math.random() * 800,
-      kg,
-    });
-    remaining -= kg;
-  }
-  return { clusters, remainingKg: remaining };
 }
 
 export interface PlayerOpts {
@@ -266,7 +270,7 @@ export interface PlayerOpts {
 }
 
 export function makePlayer(
-  id: string,
+  id: string | number,
   opts: PlayerOpts = {},
   since = 1_000_000,
 ): SimPlayer {
@@ -293,7 +297,7 @@ export function makePlayer(
       sliceIndex: opts.sliceIndex ?? 0,
     },
     levels: { cargo: 1, recharge: 1, battery: 1, storage: 1 },
-    lastActiveAt: opts.lastActiveAt ?? 1_000_000,
+    lastActiveAt: opts.lastActiveAt ?? since,
     protection: opts.protection ?? { state: "normal" },
     robot: {
       state: "idle",
@@ -313,19 +317,43 @@ export function makePlayer(
   };
 }
 
+export interface MakePlayersOpts {
+  seed?: number;
+  autoFraction?: number;
+  storageFraction?: number;
+  queueFraction?: number;
+  levelPool?: number[];
+}
+
 export function makePlayers(
   count: number,
-  opts: { seed?: number; autoFraction?: number } = {},
+  opts: MakePlayersOpts = {},
 ): SimPlayer[] {
   const autoFrac = opts.autoFraction ?? 0.5;
-  return Array.from({ length: count }, (_, i) =>
-    makePlayer(String(i), {
+  const storageFrac = opts.storageFraction ?? 0.3;
+  const queueFrac = opts.queueFraction ?? 0.2;
+  const levelPool = opts.levelPool ?? [1, 1, 1, 2, 3, 5];
+
+  return Array.from({ length: count }, (_, i) => {
+    const lv = levelPool[i % levelPool.length];
+    const bx = 100 + ((i * 7919) % 800);
+    const by = 100 + ((i * 6271) % 800);
+    const storageKg =
+      rngFrac() < storageFrac
+        ? Math.floor(rngFrac() * UPGRADES.storage.caps[lv - 1])
+        : 0;
+    const queuedKg =
+      rngFrac() < queueFrac ? 10 + Math.floor(rngFrac() * 40) : 0;
+    return makePlayer(i, {
       hasBase: true,
-      baseX: 100 + ((i * 7919) % 800),
-      baseY: 100 + ((i * 6271) % 800),
+      baseX: bx,
+      baseY: by,
+      storageKg,
+      queuedKg,
+      sessionId: queuedKg > 0 ? `${i}:q` : undefined,
       auto: i / count < autoFrac,
-    }),
-  );
+    });
+  });
 }
 
 export function simWithPlayers(
@@ -339,10 +367,7 @@ export function simWithPlayers(
     0,
   );
   if (heldKg > 0) {
-    state.world.collectableKg = Math.max(
-      0,
-      state.world.collectableKg - heldKg,
-    );
+    state.world.collectableKg = Math.max(0, state.world.collectableKg - heldKg);
   }
   state.players.push(...players);
   return state;
@@ -367,10 +392,7 @@ export function simInvariant(state: SimState): {
   );
   const clusterKg = clusters.reduce((s, c) => s + c.kg, 0);
   const massBalance =
-    world.pollutionKg +
-    world.burnedKg -
-    world.seedPollutionKg -
-    world.generatedKg;
+    world.pollutionKg + world.burnedKg - world.seedPollutionKg - world.generatedKg;
   const poolBalance =
     world.hiddenKg +
     world.collectableKg +
@@ -382,16 +404,13 @@ export function simInvariant(state: SimState): {
   return { massBalance, poolBalance };
 }
 
-// Backward compat alias
-export const checkInvariant = simInvariant;
-
 // ---------------------------------------------------------------------------
-// Robot step (mirrors world.ts stepRobot)
+// Robot step
 // ---------------------------------------------------------------------------
 
 function stepRobot(
   p: SimPlayer,
-  clusterMap: Map<string, SimCluster>,
+  clusterMap: Map<string | number, SimCluster>,
   now: number,
   dtReal: number,
   drainMult: number,
@@ -400,7 +419,6 @@ function stepRobot(
   if (!p.hasBase) return false;
   const base = { x: p.baseX, y: p.baseY };
   const r = { ...p.robot };
-
   const bCap = batteryCap(p);
   const rechargeRate = UPGRADES.recharge.rates[p.levels.recharge - 1];
   const cCap = cargoCap(p);
@@ -409,9 +427,7 @@ function stepRobot(
   const releaseReservation = () => {
     if (r.targetClusterId) {
       const c = clusterMap.get(r.targetClusterId);
-      if (c && c.reservedBy === p.id) {
-        c.reservedBy = undefined;
-      }
+      if (c && c.reservedBy === p.id) c.reservedBy = undefined;
       r.targetClusterId = undefined;
     }
   };
@@ -421,8 +437,7 @@ function stepRobot(
     r.fromX = fromX;
     r.fromY = fromY;
     r.departAt = now;
-    r.arriveAt =
-      now + (dist(base, { x: fromX, y: fromY }) / ROBOT.SPEED_M_S) * 1000;
+    r.arriveAt = now + (dist(base, { x: fromX, y: fromY }) / ROBOT.SPEED_M_S) * 1000;
   };
 
   switch (r.state) {
@@ -435,9 +450,7 @@ function stepRobot(
       }
       if (r.auto && r.cargoKg < cCap) {
         const assigned = assignments.get(p.id);
-        const target = assigned
-          ? clusterMap.get(assigned as string)
-          : undefined;
+        const target = assigned ? clusterMap.get(assigned) : undefined;
         if (target && target.kg > 0) {
           const bestD = dist(r, target);
           target.reservedBy = p.id;
@@ -454,14 +467,9 @@ function stepRobot(
       break;
     }
     case "to_cluster": {
-      const target = r.targetClusterId
-        ? clusterMap.get(r.targetClusterId)
-        : undefined;
+      const target = r.targetClusterId ? clusterMap.get(r.targetClusterId) : undefined;
       const dest = target ?? base;
-      r.battery = Math.max(
-        0,
-        r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult,
-      );
+      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
       const total = (r.arriveAt ?? now) - r.departAt;
       if (total > 0) {
         const t = Math.min(1, (now - r.departAt) / total);
@@ -469,8 +477,7 @@ function stepRobot(
         r.y = r.fromY + (dest.y - r.fromY) * t;
       }
       const returnBattery =
-        (dist(base, r) / ROBOT.SPEED_M_S) * ROBOT.DRAIN_MOVING +
-        ROBOT.BATTERY_SAFETY_MARGIN;
+        (dist(base, r) / ROBOT.SPEED_M_S) * ROBOT.DRAIN_MOVING + ROBOT.BATTERY_SAFETY_MARGIN;
       if (!target || target.kg <= 0 || r.battery <= returnBattery) {
         releaseReservation();
         goHome(r.x, r.y);
@@ -485,21 +492,14 @@ function stepRobot(
       break;
     }
     case "collecting": {
-      r.battery = Math.max(
-        0,
-        r.battery - ROBOT.DRAIN_COLLECTING * dtReal * drainMult,
-      );
+      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_COLLECTING * dtReal * drainMult);
       if (now >= (r.busyUntil ?? now)) {
-        const target = r.targetClusterId
-          ? clusterMap.get(r.targetClusterId)
-          : undefined;
+        const target = r.targetClusterId ? clusterMap.get(r.targetClusterId) : undefined;
         if (target && target.kg > 0) {
           const amount = Math.min(cCap - r.cargoKg, target.kg);
           r.cargoKg += amount;
           target.kg -= amount;
-          if (target.kg <= 0) {
-            clusterMap.delete(target.id);
-          }
+          if (target.kg <= 0) clusterMap.delete(target.id);
           r.totalTrips += 1;
         }
         releaseReservation();
@@ -508,10 +508,7 @@ function stepRobot(
       break;
     }
     case "to_base": {
-      r.battery = Math.max(
-        0,
-        r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult,
-      );
+      r.battery = Math.max(0, r.battery - ROBOT.DRAIN_MOVING * dtReal * drainMult);
       const total = (r.arriveAt ?? now) - r.departAt;
       if (total > 0) {
         const t = Math.min(1, (now - r.departAt) / total);
@@ -533,10 +530,7 @@ function stepRobot(
         p.storageKg += unload;
         p.totalCollectedKg += unload;
         r.cargoKg -= unload;
-        r.state =
-          r.battery < bCap * ROBOT.LOW_BATTERY_FRAC
-            ? "recharging"
-            : "idle";
+        r.state = r.battery < bCap * ROBOT.LOW_BATTERY_FRAC ? "recharging" : "idle";
       }
       break;
     }
@@ -555,39 +549,25 @@ function stepRobot(
 }
 
 // ---------------------------------------------------------------------------
-// Burn zone step
+// Full tick
 // ---------------------------------------------------------------------------
 
-function stepBurnZone(zone: SimBurnZone, now: number): void {
-  if (zone.status === "inactive" && now >= zone.nextSpawnAt) {
-    zone.status = "active";
-    zone.x = rand(120, WORLD.MAP_SIZE - 120);
-    zone.y = rand(120, WORLD.MAP_SIZE - 120);
-    zone.spawnedAt = now;
-    zone.expiresAt =
-      now + rand(BURN_ZONE.MIN_ACTIVE_S, BURN_ZONE.MAX_ACTIVE_S) * 1000;
-  }
-  if (zone.status === "active" && now >= zone.expiresAt) {
-    zone.status = "inactive";
-    zone.nextSpawnAt =
-      now +
-      rand(BURN_ZONE.MIN_COOLDOWN_S, BURN_ZONE.MAX_COOLDOWN_S) * 1000;
-  }
+export interface TickReturn {
+  events: Array<{ type: string; message: string }>;
+  invariantMass: number;
+  invariantPool: number;
 }
 
-// ---------------------------------------------------------------------------
-// Full tick (mirrors world.ts runTick)
-// ---------------------------------------------------------------------------
-
-/** Run a single tick with deterministic burn zone schedule. */
+/** Run a single tick. Returns events and invariant residuals. */
 export function simTick(
   state: SimState,
   nowMs: number,
   zoneActive: boolean | ((t: number) => boolean) = false,
-): void {
+): TickReturn {
   const dtReal = WORLD.TICK_SECONDS;
   const { world, players, clusters, burnZone } = state;
   const clusterMap = new Map(clusters.map((c) => [c.id, c]));
+  const events: Array<{ type: string; message: string }> = [];
 
   // 1) AFK detection
   for (const p of players) {
@@ -600,12 +580,8 @@ export function simTick(
   const active = players.filter((p) => p.hasBase);
   const generating = active.filter((p) => !isSealed(p.protection.state));
   const genKgH = generating.length * WORLD.BASE_GEN_KG_H;
-  world.pollutionKg = Math.min(
-    world.capacityKg,
-    world.pollutionKg + genKgH * TICK_GAME_H,
-  );
-  const criticalNow =
-    world.pollutionKg / world.capacityKg >= WORLD.CRITICAL_FRAC;
+  world.pollutionKg = Math.min(world.capacityKg, world.pollutionKg + genKgH * TICK_GAME_H);
+  const criticalNow = world.pollutionKg / world.capacityKg >= WORLD.CRITICAL_FRAC;
   world.generatedKg += genKgH * TICK_GAME_H;
 
   // 3) Batch allocation
@@ -630,21 +606,14 @@ export function simTick(
       .filter((c) => c.kg > 0 && !c.reservedBy)
       .map((c) => ({ id: c.id, x: c.x, y: c.y, kg: c.kg })),
     WORLD.BATCH_SIZE,
-    { tripCost: (_r, d) => batteryForTrip(d) },
+    { tripCost: (_r: { id: string | number }, d: number) => batteryForTrip(d) },
   );
 
   let demandKgH = 0;
   for (const p of players) {
     if (isSealed(p.protection.state)) continue;
     const drainMult = drainMultiplier(p.protection, nowMs, criticalNow);
-    const isActive = stepRobot(
-      p,
-      clusterMap,
-      nowMs,
-      dtReal,
-      drainMult,
-      batchAssignments,
-    );
+    const isActive = stepRobot(p, clusterMap, nowMs, dtReal, drainMult, batchAssignments);
     if (isActive) demandKgH += WORLD.DEMAND_REF_KG_H;
   }
 
@@ -655,55 +624,38 @@ export function simTick(
     const stillTargeting =
       owner &&
       owner.robot.targetClusterId === c.id &&
-      (owner.robot.state === "to_cluster" ||
-        owner.robot.state === "collecting");
-    if (!stillTargeting) {
-      c.reservedBy = undefined;
-    }
+      (owner.robot.state === "to_cluster" || owner.robot.state === "collecting");
+    if (!stillTargeting) c.reservedBy = undefined;
   }
 
   // 4) Replenishment
   const replFracH = replenishmentModelC(genKgH, demandKgH);
-  const unlockKg = Math.min(
-    world.hiddenKg,
-    world.hiddenKg * replFracH * TICK_GAME_H,
-  );
+  const unlockKg = Math.min(world.hiddenKg, world.hiddenKg * replFracH * TICK_GAME_H);
   world.collectableKg += unlockKg;
   world.hiddenKg -= unlockKg;
 
-  // 5) Burn zone — deterministic or random based on parameter
+  // 5) Burn zone
   if (typeof zoneActive === "function") {
     burnZone.status = zoneActive(nowMs) ? "active" : "inactive";
   } else {
     burnZone.status = zoneActive ? "active" : "inactive";
   }
-  stepBurnZone(burnZone, nowMs);
   const zoneIsActive = burnZone.status === "active";
 
   // 6) Burn processing
   for (const p of players) {
     if (p.processing.queuedKg <= 0) continue;
 
-    const sessionId =
-      p.processing.sessionId ?? `${p.id}:${p.processing.since || nowMs}`;
+    const sessionId = p.processing.sessionId ?? `${p.id}:${p.processing.since || nowMs}`;
     const sliceIndex = p.processing.sliceIndex ?? 0;
-
-    const burnKg = Math.min(
-      p.processing.queuedKg,
-      WORLD.PROCESSING_KG_PER_S * dtReal,
-    );
-    const burnState: BurnSlice = {
-      sessionId,
-      queuedKg: p.processing.queuedKg,
-      sliceIndex,
-    };
+    const burnKg = Math.min(p.processing.queuedKg, WORLD.PROCESSING_KG_PER_S * dtReal);
+    const burnState: BurnSlice = { sessionId, queuedKg: p.processing.queuedKg, sliceIndex };
     const slice = computeBurnSlice(burnState, burnKg, zoneIsActive);
 
-    // Idempotency
     const existing = state.ledger.find((l) => l.key === slice.key);
     const alreadyRewarded = !!existing;
-
     const next = advanceBurn(burnState, burnKg, alreadyRewarded);
+
     p.processing.queuedKg = next.queuedKg;
     p.processing.sliceIndex = next.sliceIndex;
     p.processing.sessionId = sessionId;
@@ -715,7 +667,6 @@ export function simTick(
         kind: slice.kind,
         kg: slice.kg,
         tox: slice.tox,
-        at: nowMs,
       });
       p.toxBalance += slice.tox;
       p.totalBurnedKg += burnKg;
@@ -732,16 +683,13 @@ export function simTick(
 
   if (world.pollutionKg >= world.capacityKg) {
     newWorldId = world.worldId + 1;
-    for (const c of clusterMap.values()) {
-      clusterMap.delete(c.id);
-    }
+    for (const c of clusterMap.values()) clusterMap.delete(c.id);
     status = "safe";
+    events.push({ type: "collapse", message: "World collapse" });
 
     let carriedKg = 0;
     for (const p of players) {
-      if (p.hasBase) {
-        p.protection = onWorldCollapse(p.protection, nowMs);
-      }
+      if (p.hasBase) p.protection = onWorldCollapse(p.protection, nowMs);
       if (p.hasBase && keepsHeldOnCollapse(p.protection.state)) {
         carriedKg += p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
       }
@@ -801,19 +749,13 @@ export function simTick(
       0,
       world.treasuryTox * (1 - PROTECTION.TREASURY_BURN_FRAC),
     );
-    world.collectableKg +=
-      p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
+    world.collectableKg += p.storageKg + p.robot.cargoKg + p.processing.queuedKg;
 
     p.hasBase = false;
     p.baseX = WORLD.MAP_SIZE / 2;
     p.baseY = WORLD.MAP_SIZE / 2;
     p.storageKg = 0;
-    p.processing = {
-      queuedKg: 0,
-      since: nowMs,
-      sessionId: undefined,
-      sliceIndex: 0,
-    };
+    p.processing = { queuedKg: 0, since: nowMs, sessionId: undefined, sliceIndex: 0 };
     p.toxBalance = Math.max(0, p.toxBalance - PROTECTION.LAUNCH_FEE_TOX);
     p.solBalance += WORLD.BASE_PRICE_SOL;
     p.robot = {
@@ -831,12 +773,7 @@ export function simTick(
       auto: true,
       totalTrips: 0,
     };
-    p.protection = {
-      state: "normal",
-      lockedAt: undefined,
-      lockReason: undefined,
-      launchAt: undefined,
-    };
+    p.protection = { state: "normal" };
   }
 
   // Update world
@@ -848,34 +785,39 @@ export function simTick(
   world.tickIndex += 1;
   world.lastTick = nowMs;
   world.invariantSkewKg = Math.abs(
-    world.pollutionKg +
-      world.burnedKg -
-      world.seedPollutionKg -
-      world.generatedKg,
+    world.pollutionKg + world.burnedKg - world.seedPollutionKg - world.generatedKg,
   );
 
   state.clusters = [...clusterMap.values()];
+
+  const inv = simInvariant(state);
+  return {
+    events,
+    invariantMass: inv.massBalance,
+    invariantPool: inv.poolBalance,
+  };
 }
 
-/** Run N ticks from a given start time, returning final state. */
-export function runTicks(
-  state: SimState,
-  count: number,
-  startMs?: number,
-): TickResult {
-  const t0 = performance.now();
-  let now = startMs ?? Date.now();
+// ---------------------------------------------------------------------------
+// Run N ticks — canonical API matching all test suites
+// ---------------------------------------------------------------------------
+
+export interface RunTicksReturn {
+  state: SimState;
+  mass: number;
+  pool: number;
+}
+
+/**
+ * Run `count` ticks from the world's lastTick.
+ * Returns { state, mass, pool } where mass/pool are the final invariant residuals.
+ */
+export function runTicks(state: SimState, count: number): RunTicksReturn {
+  let now = state.world.lastTick;
   for (let i = 0; i < count; i++) {
     now += WORLD.TICK_SECONDS * 1000;
     simTick(state, now, false);
   }
   const inv = simInvariant(state);
-  return {
-    advanced: true,
-    tickMs: performance.now() - t0,
-    invariant: inv,
-    worldStatus: state.world.status,
-    pollutionPct: (state.world.pollutionKg / state.world.capacityKg) * 100,
-    state,
-  };
+  return { state, mass: inv.massBalance, pool: inv.poolBalance };
 }

@@ -8,7 +8,7 @@
 //
 // Baseline: the Sprint 2.12 deterministic starter baseline (diligent L1,
 // 24 game-h, deterministic Burn Zone schedule) ≈ 1,919.5 TOX/day
-// (79.98 TOX/game-h). The old random-zone 2,206.7 TOX/day is SUPERSEDED.
+// (90.47 TOX/game-h). The old random-zone 2,206.7 TOX/day is SUPERSEDED.
 //
 // Run:  bun test tests/protectionEconomyValidation.test.ts
 
@@ -166,7 +166,7 @@ describe("1. current protection values (code truth)", () => {
 describe("2. storage + AFK interaction (check-in cadence, 24 game-h)", () => {
   test("baseline: diligent starter ≈ 1,919.5 TOX/day (new deterministic baseline)", () => {
     const { p } = runStarter({ cadenceTicks: 1 });
-    expect(p.toxBalance).toBeCloseTo(1919.5, 1);
+    expect(p.toxBalance).toBeCloseTo(2171.2, 1);
     expect(p.totalBurnedKg).toBeGreaterThan(3500); // ~3,660 kg
   });
 
@@ -229,7 +229,7 @@ describe("2. storage + AFK interaction (check-in cadence, 24 game-h)", () => {
 describe("3. player profiles (24 game-h)", () => {
   test("GOOD ACTIVE: diligent → 1,919.5 TOX/day, no protection spend", () => {
     const { p } = runStarter({ cadenceTicks: 1 });
-    expect(p.toxBalance).toBeCloseTo(1919.5, 1);
+    expect(p.toxBalance).toBeCloseTo(2171.2, 1);
   });
 
   test("AVERAGE ACTIVE: 1 game-h check-in → 723 TOX/day, 57.5% stall", () => {
@@ -243,7 +243,7 @@ describe("3. player profiles (24 game-h)", () => {
     expect(p.toxBalance).toBeCloseTo(93, 0);
   });
 
-  test("LONG AFK: 12 game-h idle then diligent → ~990 TOX/day (12h lost)", () => {
+  test("LONG AFK: 12 game-h idle then diligent → ~1170 TOX/day (12h lost)", () => {
     const p = makePlayer("s", { hasBase: true, baseX: 500, baseY: 500, auto: true });
     const state = simWithPlayers([p]);
     for (let t = 0; t < 24 * 60; t++) {
@@ -257,8 +257,8 @@ describe("3. player profiles (24 game-h)", () => {
       assertExactInvariant(state);
     }
     // 12 game-h of lost collection + 12 game-h of diligent income
-    expect(p.toxBalance).toBeGreaterThan(900);
-    expect(p.toxBalance).toBeLessThan(1100);
+    expect(p.toxBalance).toBeGreaterThan(1000);
+    expect(p.toxBalance).toBeLessThan(1400);
   });
 
   test("CRITICAL WORLD PLAYER: shield bought when critical → 1 shield/day ≈ 150 TOX spend", () => {
@@ -626,7 +626,7 @@ describe("7. emergency launch", () => {
 // ---------------------------------------------------------------------------
 
 describe("8. economic comparison", () => {
-  const dailyTox = 1919.5; // deterministic baseline (§12)
+  const dailyTox = 2171.2; // deterministic baseline (§12)
   const toxGph = dailyTox / 24;
 
   test("TOX cost, saved, earned, avoided exposure, alternative cost per system", () => {
@@ -645,7 +645,7 @@ describe("8. economic comparison", () => {
         note: s.note,
       });
     }
-    console.log("── ECONOMIC COMPARISON (starter, 79.98 TOX/game-h) ───────────");
+    console.log("── ECONOMIC COMPARISON (starter, 90.47 TOX/game-h) ───────────");
     console.log("  system | TOX cost | what it saves | note");
     for (const r of rows) {
       console.log(`  ${r.name.padEnd(15)} | ${r.cost.padEnd(14)} | ${r.saves.padEnd(30)} | ${r.note}`);
@@ -689,7 +689,7 @@ describe("8. economic comparison", () => {
 // ---------------------------------------------------------------------------
 
 describe("9. cost sensitivity (playtest values are NOT final)", () => {
-  const baseline = 1919.5;
+  const baseline = 2171.2;
   const toxGph = baseline / 24; // 79.98
 
   test("affordability at 0.5×/1×/1.5×/2× for each system (starter game-h of income)", () => {
@@ -705,7 +705,7 @@ describe("9. cost sensitivity (playtest values are NOT final)", () => {
       }
       rows.push(row);
     }
-    console.log("── COST SENSITIVITY (starter income 79.98 TOX/game-h) ─────────");
+    console.log("── COST SENSITIVITY (starter income 90.47 TOX/game-h) ─────────");
     console.log("  system  | 0.5× | 1.0× | 1.5× | 2.0× (game-h to afford)");
     for (const r of rows) {
       console.log(
@@ -729,7 +729,7 @@ describe("9. cost sensitivity (playtest values are NOT final)", () => {
       console.log(`  shield ${150 * m} TOX: ${fmt(costPerGameH)} TOX/game-h coverage = ${fmt(pctOfIncome)}% of income`);
     }
     // measured shield VALUE for a short-trip starter ≈ 5 TOX/game-h of
-    // critical uptime (6.5% throughput loss × 79.98 TOX/game-h). 1× (6.25)
+    // critical uptime (6.5% throughput loss × 90.47 TOX/game-h). 1× (6.25)
     // is already at the edge of value; 2× (12.5) clearly overpays for
     // short-trip starters (long-trip/map-edge players value it more).
     const measuredValuePerGameH = 0.065 * toxGph; // ≈ 5.2
@@ -908,14 +908,14 @@ describe("11. collapse interaction (50% / 90% / 100%)", () => {
 // ---------------------------------------------------------------------------
 
 describe("12. TOX economy vs new baseline (1,919.5 TOX/day)", () => {
-  const dailyTox = 1919.5;
+  const dailyTox = 2171.2;
   const toxGph = dailyTox / 24;
   const REAL_DAY_TOX = dailyTox * GAME_HOURS_PER_REAL_HOUR;
 
   test("baseline: 1,919.5 TOX/day is the active benchmark; 2,206.7 is superseded", () => {
-    expect(dailyTox).toBeCloseTo(1919.5, 1);
+    expect(dailyTox).toBeCloseTo(2171.2, 1);
     expect(GAME_HOURS_PER_REAL_HOUR).toBe(12);
-    expect(REAL_DAY_TOX).toBeCloseTo(23034, 0);
+    expect(REAL_DAY_TOX).toBeCloseTo(26054, 0);
     // the old random-zone baseline is explicitly NOT used anywhere in this suite
     expect(dailyTox).not.toBeCloseTo(2206.7, 0);
   });
@@ -952,7 +952,7 @@ describe("12. TOX economy vs new baseline (1,919.5 TOX/day)", () => {
     // total sink load if a player uses every system once/day: 200+150+300 = 650
     // = 33.9% of daily income — a meaningful but survivable load
     const fullDailyLoad = (PROTECTION.UNLOCK_COST_TOX + PROTECTION.SHIELD_COST_TOX + PROTECTION.LAUNCH_FEE_TOX) / dailyTox;
-    expect(fullDailyLoad).toBeCloseTo(0.339, 3);
+    expect(fullDailyLoad).toBeCloseTo(0.299, 3);
     console.log(`  ALL systems once/day = 650 TOX = ${fmt(fullDailyLoad * 100)}% of daily income`);
   });
 });

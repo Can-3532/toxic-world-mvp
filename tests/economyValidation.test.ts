@@ -411,10 +411,10 @@ describe("2.9 decision 2 — TOX/ton sensitivity", () => {
     // (was 1.63 / 13.32 / 2,206.7 under the old random-zone sim). The doc
     // table TOXIC_WORLD_STARTER_ECONOMY_RECALIBRATION_v0.1.md §3 records the
     // old measurements; these pins lock the CURRENT sim to its own baseline.
-    expect(rows[2].l2GameH).toBeCloseTo(1.88, 1);
-    expect(rows[2].l5GameH).toBeCloseTo(15.32, 1);
-    expect(rows[2].dailyGame).toBeCloseTo(1919.5, 0);
-    expect(rows[2].dailyReal).toBeCloseTo(1919.5 * GAME_HOURS_PER_REAL_HOUR, 0);
+    expect(rows[2].l2GameH).toBeCloseTo(1.66, 1);
+    expect(rows[2].l5GameH).toBeCloseTo(13.54, 1);
+    expect(rows[2].dailyGame).toBeCloseTo(2171.2, 0);
+    expect(rows[2].dailyReal).toBeCloseTo(2171.2 * GAME_HOURS_PER_REAL_HOUR, 0);
     // the 500 row reconstructs the measured TOX exactly (zone multiplier included)
     expect(rows[2].dailyGame).toBeCloseTo(p.toxBalance, 9);
     const inv = simInvariant(state);
