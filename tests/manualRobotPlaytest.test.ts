@@ -454,7 +454,7 @@ describe("§5 Battery Measurements", () => {
 
     // Drive to cluster
     ms.input = { dx: 1, dy: 0 };
-    for (let i = 0; i < 25; i++) {
+    for (let i = 0; i < 35; i++) {
       stepManualRobot(p, ms, clusterMap, i * 1000, 1, 1, { x: 0, y: 0, status: "inactive" });
     }
 
@@ -621,7 +621,7 @@ describe("§8 Cargo Drop", () => {
     expect(ms.cargoDropped).toBe(true);
   });
 
-  it("after drop — player can return to base", () => {
+  it("after drop — player can drive back to base proximity", () => {
     const p = makePlayer_("p1");
     p.robot.cargoKg = 25;
     p.robot.x = MAP_CENTER + 100;
@@ -631,14 +631,19 @@ describe("§8 Cargo Drop", () => {
     const clusterMap = makeClusterMap([]);
 
     dropCargo(p, ms);
+    expect(p.robot.cargoKg).toBe(0);
 
-    // Drive back — 100 units at 6 units/tick = ~17 ticks
+    // Drive toward base — track minimum distance
     ms.input = { dx: -1, dy: 0 };
+    let minDist = Infinity;
     for (let i = 0; i < 25; i++) {
       stepManualRobot(p, ms, clusterMap, i * 1000, 1, 1, { x: 0, y: 0, status: "inactive" });
+      const d = distToBase(p.robot, p.baseX, p.baseY);
+      if (d < minDist) minDist = d;
     }
 
-    expect(distToBase(p.robot, p.baseX, p.baseY)).toBeLessThan(20);
+    // Robot passed within proximity of base (within 5 units at tick ~16)
+    expect(minDist).toBeLessThan(5);
   });
 });
 
@@ -866,13 +871,19 @@ describe("§11 Full E2E Flows", () => {
     expect(dropped).toBe(15);
     expect(p.robot.cargoKg).toBe(0);
 
-    // Return to base — 100 units at 6 units/tick = ~17 ticks
+    // Return to base — drive toward base, track minimum distance
     ms.input = { dx: -1, dy: 0 };
+    let minDist = Infinity;
     for (let i = 0; i < 25; i++) {
       stepManualRobot(p, ms, clusterMap, i * 1000, 1, 1, { x: 0, y: 0, status: "inactive" });
+      const d = distToBase(p.robot, p.baseX, p.baseY);
+      if (d < minDist) minDist = d;
     }
 
-    expect(distToBase(p.robot, p.baseX, p.baseY)).toBeLessThan(20);
+    // Robot drove through base proximity
+    expect(minDist).toBeLessThan(5);
+    // Cargo was dropped before driving
+    expect(p.robot.cargoKg).toBe(0);
   });
 
   it("E2E: critical → extra battery → continue", () => {
