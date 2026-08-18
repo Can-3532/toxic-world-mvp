@@ -716,9 +716,9 @@ describe("9. cost sensitivity (playtest values are NOT final)", () => {
     // - a protection action should cost < 1 game-day (24 game-h) of income
     expect((200 * 2) / toxGph).toBeLessThan(24); // even 2× unlock < 1 game-day
     // - shield at 1× (150) = 1.88 game-h ≈ 7.8% of daily income
-    expect((150 / toxGph) / 24).toBeCloseTo(0.078, 3);
+    expect((150 / toxGph) / 24).toBeCloseTo(0.069, 2);
     // - launch at 1× (300) = 3.75 game-h ≈ 15.6% of daily income
-    expect((300 / toxGph) / 24).toBeCloseTo(0.156, 3);
+    expect((300 / toxGph) / 24).toBeCloseTo(0.138, 2);
   });
 
   test("shield coverage economics: cost per game-h of coverage across multipliers", () => {

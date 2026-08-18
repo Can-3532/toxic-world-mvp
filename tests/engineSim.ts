@@ -267,6 +267,12 @@ export interface PlayerOpts {
   protection?: Protection;
   auto?: boolean;
   cargoKg?: number;
+  processing?: {
+    queuedKg?: number;
+    since?: number;
+    sessionId?: string;
+    sliceIndex?: number;
+  };
 }
 
 export function makePlayer(
@@ -291,10 +297,10 @@ export function makePlayer(
     toxFromZone: 0,
     storageKg: opts.storageKg ?? 0,
     processing: {
-      queuedKg: opts.queuedKg ?? 0,
-      since,
-      sessionId: opts.sessionId,
-      sliceIndex: opts.sliceIndex ?? 0,
+      queuedKg: opts.processing?.queuedKg ?? opts.queuedKg ?? 0,
+      since: opts.processing?.since ?? since,
+      sessionId: opts.processing?.sessionId ?? opts.sessionId,
+      sliceIndex: opts.processing?.sliceIndex ?? opts.sliceIndex ?? 0,
     },
     levels: { cargo: 1, recharge: 1, battery: 1, storage: 1 },
     lastActiveAt: opts.lastActiveAt ?? since,
@@ -367,7 +373,15 @@ export function simWithPlayers(
     0,
   );
   if (heldKg > 0) {
-    state.world.collectableKg = Math.max(0, state.world.collectableKg - heldKg);
+    // Deduct held mass from pools: first from collectable, then from hidden.
+    // This keeps the pool invariant exact: hidden + collectable + cluster + held == pollution.
+    let remaining = heldKg;
+    const fromCollectable = Math.min(state.world.collectableKg, remaining);
+    state.world.collectableKg -= fromCollectable;
+    remaining -= fromCollectable;
+    if (remaining > 0) {
+      state.world.hiddenKg -= remaining;
+    }
   }
   state.players.push(...players);
   return state;
@@ -553,6 +567,7 @@ function stepRobot(
 // ---------------------------------------------------------------------------
 
 export interface TickReturn {
+  state: SimState;
   events: Array<{ type: string; message: string }>;
   invariantMass: number;
   invariantPool: number;
@@ -792,6 +807,7 @@ export function simTick(
 
   const inv = simInvariant(state);
   return {
+    state,
     events,
     invariantMass: inv.massBalance,
     invariantPool: inv.poolBalance,

@@ -1,7 +1,8 @@
-# TOXIC WORLD — PROTECTION SYSTEMS DESIGN v0.1 (SPRINT 2.11 + 2.12)
+# TOXIC WORLD — PROTECTION SYSTEMS DESIGN v0.1 (SPRINT 2.11 + 2.12 + 2.12.1)
 
 Status: **FROZEN for implementation** (Sprint 2.11); **economy validated,
-conditional freeze** (Sprint 2.12 — see §8).
+conditional freeze** (Sprint 2.12 — see §8); **final freeze with sensitivity
+validation** (Sprint 2.12.1 — see §9).
 Supersedes: no prior doc (the Design Freeze v0.3 listed the four systems as
 decisions without mechanics; the Engineering Handoff carried them as
 "NOT IMPLEMENTED", next-task #2).
@@ -215,9 +216,12 @@ lands, this field becomes its simulation anchor.
 Suite: `tests/protectionEconomyValidation.test.ts` — 56 tests / 0 fail (added
 this sprint; full suite now 149 tests / 109,827 assertions / 0 fail). All
 measurements use the deterministic oracle (`tests/engineSim.ts` → mirrors
-`world.ts`/`engine.ts`/`economy.ts`) and the **new deterministic starter
-baseline: 1,919.5 TOX/day = 79.98 TOX/game-h = 959.75 TOX/real-h** (the
-2,206.7 TOX/day value is a superseded benchmark).
+`world.ts`/`engine.ts`/`economy.ts`) and the **deterministic starter
+baseline: ~2,171 TOX/day = ~90.5 TOX/game-h = ~1,086 TOX/real-h**.
+
+**AUTHORITATIVE BASELINE (Sprint 2.12.1):** The 2,206.7 TOX/day and 1,919.5
+TOX/day values are superseded. The current deterministic baseline with seeded
+RNG is **~2,171 TOX/game-day**. All economic comparisons use this value.
 
 ### 8.1 Storage + AFK interaction (does AFK invalidate storage? — NO)
 
@@ -326,3 +330,103 @@ frequency before launch. Everything else is test-supported as-is.
 | Full test suite passes | ✔ 149 tests / 0 fail |
 | Typecheck passes | ✔ `bun tsc -b --noEmit` |
 | No unexplained invariant drift | ✔ every scenario (`simInvariant` exact) |
+
+---
+
+## 9. SPRINT 2.12.1 — FINAL FREEZE WITH SENSITIVITY VALIDATION
+
+**Date:** Sprint 2.12.1
+**Status:** PROTECTION ECONOMY STATUS: **FREEZE** (all systems test-validated)
+**Regression:** 288 tests / 0 fail / `bun tsc -b --noEmit` clean
+**Test Suite:** 7 files, canonical `tests/engineSim.ts` API
+
+### 9.1 Test Suite Consolidation
+
+All test files now use the canonical `tests/engineSim.ts` API:
+- `tests/engine.test.ts` — engine math + whole-world oracle (21 tests)
+- `tests/economy.test.ts` — v0.4 reward economy (11 tests)
+- `tests/economyValidation.test.ts` — time compression + economy (18 tests)
+- `tests/storageBatteryValidation.test.ts` — storage/battery rebalance (32 tests)
+- `tests/protectionValidation.test.ts` — protection state machine (103 tests)
+- `tests/protectionEconomyValidation.test.ts` — protection economy (56 tests)
+- `tests/protectionSensitivity.test.ts` — sensitivity + decisions (47 tests)
+
+**Acceptance:** `bunx vitest run` → 288/288 PASS
+
+### 9.2 Protection Economy Baseline (Final)
+
+| Metric | Value |
+|---|---|
+| Starter TOX/game-h | ~90.5 |
+| Starter TOX/game-day (24 game-h) | ~2,171 |
+| Starter TOX/real-day (24 real-h) | ~26,054 |
+| Time to Cargo L2 | ~1.66 game-h |
+| Time to Cargo L5 | ~13.54 game-h |
+| GAME_HOURS_PER_REAL_HOUR | 12 |
+
+### 9.3 Final Protection Decisions
+
+| System | Duration | Cost | Status | Reason |
+|---|---|---|---|---|
+| AFK Protection | 12 real hours | FREE | **FREEZE** | Involuntary safety net; cost adds unnecessary friction. Unlock fee (200) covers re-entry. |
+| Base Lock | Voluntary | 200 TOX unlock | **FREEZE** | ~2.2 game-h to earn. Affordable within one session, expensive enough to be a real decision. Burn queue continues (anti-deadlock). |
+| Toxic Shield | 2 real hours | 150 TOX | **PLAYTEST** | ~6.25 TOX/game-h coverage vs ~5 TOX/game-h measured value for short-trip starter. Slight overpay justified as insurance; scales with trip length. |
+| Emergency Launch | 5 real minutes | 300 TOX | **FREEZE** | ~3.3 game-h to earn. 300 > unlock (200) because launch abandons base+robot+stockpile. Treasury −15%. |
+
+### 9.4 Interaction Matrix (Verified)
+
+| Combination | Valid | Behavior |
+|---|---|---|
+| AFK + Lock | Yes | AFK auto-locks at collapse; voluntary lock overrides AFK |
+| AFK + Shield | Yes | Shield active during AFK autopilot; no conflict |
+| Lock + Shield | No | Shield purchase blocked while sealed |
+| Lock + Launch | Yes | Launch only from locked state |
+| Shield + Launch | No | Shield blocked while launching (sealed) |
+| AFK + Launch | No | AFK → locked (at collapse) → can then launch |
+
+### 9.5 Collapse Matrix (Verified)
+
+| State at Collapse | Stockpile | Base | Post-Collapse |
+|---|---|---|---|
+| NORMAL | **WIPED** | survives | normal |
+| AFK | **PRESERVED** | survives | locked (auto-lock) |
+| LOCKED | **PRESERVED** | survives | locked |
+| LAUNCHING | **PRESERVED** | survives | launching (until complete) |
+
+### 9.6 TOX Sink Impact
+
+Worst-case daily sink (all systems used once): 650 TOX = ~30% of daily income.
+This is a meaningful but survivable load. At steady state (no critical/collapse),
+the only recurring cost is the AFK unlock fee (200 TOX, event-driven).
+
+### 9.7 Remaining Risks
+
+1. **Shield value in critical** — measured ~5 TOX/game-h for short-trip starter vs
+   6.25 TOX/game-h cost. Marginal for L1 starters; scales with cargo level.
+   **Resolution:** Playtest critical-phase frequency before launch.
+2. **AFK fairness** — AFK players keep stockpile on collapse while active players
+   who didn't lock lose theirs. This is by design (the asymmetry is the point).
+   **Resolution:** Playtest community response.
+3. **Treasury drain** — mock treasury decreases with each launch. At 15% per
+   launch, the treasury can sustain ~10 launches before reaching 20% of seed.
+   **Resolution:** Mock only; real treasury is a future Solana/outbox task.
+
+### 9.8 Acceptance Criteria → Status
+
+| Criterion | Status |
+|---|---|
+| All regression tests PASS | ✔ 288/288 |
+| Protection tests PASS | ✔ 103/103 |
+| No simulator API mismatch | ✔ canonical engineSim.ts |
+| Primary invariant PASS | ✔ every scenario |
+| Secondary invariant PASS | ✔ every scenario |
+| Determinism PASS | ✔ identical inputs → identical outputs |
+| Protection economy measured | ✔ §9.2 |
+| Interaction matrix PASS | ✔ §9.4 |
+| Collapse matrix PASS | ✔ §9.5 |
+| Documentation updated | ✔ this document |
+| Typecheck passes | ✔ `bun tsc -b --noEmit` |
+
+**FINAL STATUS: FREEZE** — All protection systems validated with sensitivity
+testing. Shield flagged for playtest (value marginal for short-trip starters).
+All other values frozen with test support.
