@@ -1,16 +1,18 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { BURN_ZONE_MULTIPLIER, TOX_PER_TON, WORLD, type UpgradeTrack } from "@/convex/gameParams";
 import { useAuth } from "@/hooks/use-auth";
+import { useKeyboardControl } from "@/hooks/useKeyboardControl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { WorldMap } from "@/components/game/WorldMap";
 import { Panels } from "@/components/game/Panels";
+import { ControlHUD } from "@/components/game/ControlHUD";
 import { fmtKg, fmtSol, fmtTox } from "@/components/game/format";
 import { toast } from "sonner";
-import { Biohazard, Coins, Flame, House, Loader2, Lock, LogOut, Skull, Zap } from "lucide-react";
+import { Biohazard, Coins, Flame, Gamepad2, House, Loader2, LogOut, Skull, Zap } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
 function errMsg(e: unknown): string {
@@ -20,6 +22,7 @@ function errMsg(e: unknown): string {
 export default function Game() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  const lastFrameRef = useRef(performance.now());
 
   const me = useQuery(api.game.me);
   const world = useQuery(api.world.worldState);
@@ -33,23 +36,63 @@ export default function Game() {
   const toggleAuto = useMutation(api.game.toggleAuto);
   const queueProcessing = useMutation(api.game.queueProcessing);
   const upgrade = useMutation(api.game.upgrade);
-  // Sprint 2.11 — protection systems
   const lockBase = useMutation(api.game.lockBase);
   const unlockBase = useMutation(api.game.unlockBase);
   const activateShield = useMutation(api.game.activateShield);
   const launchBase = useMutation(api.game.launchBase);
   const cancelLaunch = useMutation(api.game.cancelLaunch);
+  // Sprint 2.13 — manual driving mutations
+  const toggleManualMode = useMutation(api.game.toggleManualMode);
+  const moveRobotManual = useMutation(api.game.moveRobotManual);
+  const collectManual = useMutation(api.game.collectManual);
+  const dropCargo = useMutation(api.game.dropCargo);
+  const buyExtraBattery = useMutation(api.game.buyExtraBattery);
+  const shipStorage = useMutation(api.game.shipStorage);
+  const completeShipment = useMutation(api.game.completeShipment);
+  const depositAtBurnZone = useMutation(api.game.depositAtBurnZone);
+
+  const { getDirection, setEnabled, isMoving } = useKeyboardControl();
 
   useEffect(() => {
     void ensurePlayer().catch((e) => console.error("[game] ensurePlayer:", e));
   }, [ensurePlayer]);
+
+  const isManual = me?.manual ?? false;
+  const manualRobotState = me?.robot?.state === "driving";
+
+  // Enable/disable keyboard control based on manual mode
+  useEffect(() => {
+    setEnabled(isManual && manualRobotState);
+  }, [isManual, manualRobotState, setEnabled]);
+
+  // Manual driving loop: read keys, send movement mutation each frame
+  useEffect(() => {
+    if (!isManual || !manualRobotState) return;
+    let rafId: number;
+    const loop = () => {
+      const now = performance.now();
+      const dtMs = now - lastFrameRef.current;
+      lastFrameRef.current = now;
+      const dir = getDirection();
+      if (dir.dx !== 0 || dir.dy !== 0) {
+        void moveRobotManual({
+          dx: dir.dx,
+          dy: dir.dy,
+          dtMs,
+        }).catch(() => {});
+      }
+      rafId = requestAnimationFrame(loop);
+    };
+    lastFrameRef.current = performance.now();
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, [isManual, manualRobotState, getDirection, moveRobotManual]);
 
   const frac = world?.world ? world.world.pollutionKg / world.world.capacityKg : 0;
   const status = world?.world?.status ?? "safe";
   const critical = frac >= WORLD.CRITICAL_FRAC;
   const zone = world?.zone ?? null;
   const zoneActive = zone?.status === "active";
-  // Sprint 2.11 — protection state
   const protState = me?.protection?.state ?? "normal";
   const sealed = (protState === "locked" || protState === "launching") && !!me?.hasBase;
 
@@ -65,6 +108,16 @@ export default function Game() {
     }
     if (sealed) {
       toast.error("Base sealed", { description: "Unlock your base before commanding the robot." });
+      return;
+    }
+    if (isManual) {
+      // In manual mode, try collecting instead
+      try {
+        await collectManual();
+        toast.success("Collected waste");
+      } catch (e) {
+        toast.error("Collect failed", { description: errMsg(e) });
+      }
       return;
     }
     try {
@@ -115,7 +168,82 @@ export default function Game() {
     }
   };
 
-  // Sprint 2.11 — protection handlers
+  const handleToggleManual = async () => {
+    try {
+      const res = await toggleManualMode();
+      toast.success(
+        res.manual ? "Manual mode ON" : "Auto mode ON",
+        {
+          description: res.manual
+            ? "Use WASD / Arrow keys to drive. E to collect nearby waste."
+            : "Robot returns to autonomous mode.",
+        },
+      );
+    } catch (e) {
+      toast.error("Toggle failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleCollectManual = async () => {
+    try {
+      await collectManual();
+      toast.success("Collected waste");
+    } catch (e) {
+      toast.error("Collect failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleDropCargo = async () => {
+    try {
+      const res = await dropCargo();
+      toast.success("Cargo dropped", { description: `${fmtKg(res.droppedKg)} waste discarded.` });
+    } catch (e) {
+      toast.error("Drop failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleBuyBattery = async () => {
+    try {
+      const res = await buyExtraBattery();
+      toast.success("Extra battery", { description: `+${res.battery} battery. Cost: ${res.cost} TOX.` });
+    } catch (e) {
+      toast.error("Battery failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleShipStorage = async () => {
+    try {
+      const res = await shipStorage();
+      toast.success("Shipment started", {
+        description: `${fmtKg(res.kg)} in transit — 60s to burn.`,
+      });
+    } catch (e) {
+      toast.error("Ship failed", { description: errMsg(e) });
+    }
+  };
+
+  const handleCompleteShipment = async () => {
+    try {
+      const res = await completeShipment();
+      toast.success("Shipment arrived", {
+        description: `${fmtKg(res.queuedKg)} entered the burner.`,
+      });
+    } catch (e) {
+      toast.error("Shipment not ready", { description: errMsg(e) });
+    }
+  };
+
+  const handleDepositBurnZone = async () => {
+    try {
+      const res = await depositAtBurnZone();
+      toast.success("Direct burn!", {
+        description: `${fmtKg(res.burnedKg)} burned → +${Math.floor(res.tox)} TOX (×${res.zoneMultiplier})`,
+      });
+    } catch (e) {
+      toast.error("Burn zone deposit failed", { description: errMsg(e) });
+    }
+  };
+
   const handleLockBase = async () => {
     try {
       await lockBase();
@@ -196,7 +324,7 @@ export default function Game() {
                 critical ? "animate-blink border-red-500/60 text-red-400" : "border-primary/40 text-primary"
               }`}
             >
-              {critical ? "⚠ CRITICAL" : zoneActive ? "🔥 BURN ZONE" : "WORLD 0 · LIVE"}
+              {critical ? "CRITICAL" : isManual ? "MANUAL" : zoneActive ? "BURN ZONE" : "WORLD 0 · LIVE"}
             </Badge>
             <div className="hidden h-2 w-24 overflow-hidden rounded-full bg-muted sm:block">
               <div
@@ -209,6 +337,19 @@ export default function Game() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Manual mode toggle */}
+            {me.hasBase && !sealed && (
+              <Button
+                variant={isManual ? "default" : "outline"}
+                size="sm"
+                className="cursor-pointer gap-1.5"
+                onClick={handleToggleManual}
+                title={isManual ? "Switch to auto mode" : "Switch to manual WASD driving"}
+              >
+                <Gamepad2 className="size-3.5" />
+                {isManual ? "MANUAL" : "AUTO"}
+              </Button>
+            )}
             <span
               title="Simulated demo balance — SOL is used only for the mock base purchase, never for burn rewards"
               className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 font-mono text-xs font-bold text-primary"
@@ -228,24 +369,31 @@ export default function Game() {
         {(critical || zoneActive) && <div className="hazard-stripes-dark h-1.5 w-full" />}
       </header>
 
-      {/* SEALED BANNER — Sprint 2.11 */}
+      {/* SEALED BANNER */}
       {sealed && (
         <div className="animate-blink border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.2em] text-red-400">
-          🔒 BASE SEALED — {protState === "launching" ? "EMERGENCY LAUNCH COUNTDOWN ACTIVE" : "GENERATION OFF · ROBOT PARKED · STOCKPILE PROTECTED"}. OPEN THE DEFENSE TAB.
+          BASE SEALED — {protState === "launching" ? "EMERGENCY LAUNCH COUNTDOWN ACTIVE" : "GENERATION OFF · ROBOT PARKED · STOCKPILE PROTECTED"}. OPEN THE DEFENSE TAB.
         </div>
       )}
 
       {/* CRITICAL / BURN ZONE BANNER */}
       {critical && (
         <div className="animate-blink border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.2em] text-red-400">
-          ☣ WORLD CRITICAL — POLLUTION ABOVE 90%. BURN WASTE OR EVERYTHING COLLAPSES.
+          WORLD CRITICAL — POLLUTION ABOVE 90%. BURN WASTE OR EVERYTHING COLLAPSES.
         </div>
       )}
       {zoneActive && zone && !critical && (
         <div className="border-b border-yellow-400/40 bg-yellow-400/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.18em] text-yellow-300">
-          🔥 BURN ZONE ACTIVE at ({Math.round(zone.x)}, {Math.round(zone.y)}) — ×{BURN_ZONE_MULTIPLIER} TOX
+          BURN ZONE ACTIVE at ({Math.round(zone.x)}, {Math.round(zone.y)}) — x{BURN_ZONE_MULTIPLIER} TOX
           rewards ({Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} / t) ·{" "}
           {Math.max(0, Math.ceil((zone.expiresAt - Date.now()) / 1000))}s left
+        </div>
+      )}
+
+      {/* MANUAL MODE BANNER */}
+      {isManual && me.hasBase && (
+        <div className="border-b border-sky-400/40 bg-sky-400/10 px-4 py-2 text-center font-mono text-xs font-bold tracking-[0.18em] text-sky-300">
+          MANUAL MODE — WASD/ARROWS to drive · E to collect nearby waste · Drive to base to unload
         </div>
       )}
 
@@ -254,6 +402,15 @@ export default function Game() {
         {/* MAP */}
         <div className="relative">
           <WorldMap clusters={clusters ?? []} me={me} zone={zone} onCommand={handleCommand} />
+
+          {/* Manual mode HUD overlay */}
+          {isManual && me.hasBase && (
+            <ControlHUD
+              me={me}
+              onDropCargo={handleDropCargo}
+              onBuyBattery={handleBuyBattery}
+            />
+          )}
 
           {/* no-base overlay */}
           {!me.hasBase && (
@@ -304,13 +461,16 @@ export default function Game() {
           onActivateShield={handleActivateShield}
           onLaunchBase={handleLaunchBase}
           onCancelLaunch={handleCancelLaunch}
+          onToggleManual={handleToggleManual}
+          onShipStorage={handleShipStorage}
+          onCompleteShipment={handleCompleteShipment}
         />
       </main>
 
       <footer className="border-t border-border px-4 py-3">
         <p className="mx-auto flex max-w-7xl items-center justify-between font-mono text-[10px] text-muted-foreground">
           <span>
-            SIM · 1 tick = 1 game minute · robot speed 6 m/s · rewards {TOX_PER_TON} TOX/t, Burn Zone ×
+            SIM · 1 tick = 1 game minute · robot speed 6 m/s · rewards {TOX_PER_TON} TOX/t, Burn Zone x
             {BURN_ZONE_MULTIPLIER} ({Math.round(TOX_PER_TON * BURN_ZONE_MULTIPLIER)} TOX/t)
           </span>
           <span className="hidden items-center gap-1 sm:flex">

@@ -18,6 +18,7 @@ import {
   Battery,
   Coins,
   Flame,
+  Gamepad2,
   Lock,
   Package,
   RefreshCw,
@@ -38,16 +39,15 @@ const UPGRADE_ICONS: Record<UpgradeTrack, typeof Package> = {
   recharge: Zap,
   battery: Battery,
   storage: Warehouse,
-};
-
-const ROBOT_STATE_LABEL: Record<string, string> = {
-  idle: "IDLE",
-  to_cluster: "EN ROUTE TO CLUSTER",
-  collecting: "COLLECTING",
-  to_base: "RETURNING HOME",
-  unloading: "UNLOADING",
-  recharging: "RECHARGING",
-};
+};  const ROBOT_STATE_LABEL: Record<string, string> = {
+    idle: "IDLE",
+    to_cluster: "EN ROUTE TO CLUSTER",
+    collecting: "COLLECTING",
+    to_base: "RETURNING HOME",
+    unloading: "UNLOADING",
+    recharging: "RECHARGING",
+    driving: "MANUAL DRIVE",
+  };
 
 function Bar({ value, max, className }: { value: number; max: number; className: string }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
@@ -98,6 +98,9 @@ export function Panels({
   onActivateShield,
   onLaunchBase,
   onCancelLaunch,
+  onToggleManual,
+  onShipStorage,
+  onCompleteShipment,
 }: {
   me: Player | null | undefined;
   world: WorldPanelState | undefined;
@@ -112,6 +115,10 @@ export function Panels({
   onActivateShield: () => void;
   onLaunchBase: () => void;
   onCancelLaunch: () => void;
+  // Sprint 2.13 — manual driving + shipment
+  onToggleManual: () => void;
+  onShipStorage: () => void;
+  onCompleteShipment: () => void;
 }) {
   const w = world?.world;
   const frac = w ? w.pollutionKg / w.capacityKg : 0;
@@ -128,6 +135,10 @@ export function Panels({
     return () => clearInterval(id);
   }, []);
 
+  const isManual = me?.manual ?? false;
+  const shipping = me?.shipping;
+  const shippingActive = shipping?.active ?? false;
+  const shippingDone = shippingActive && now >= (shipping?.finishAt ?? 0);
   const storageCap = me ? UPGRADES.storage.caps[me.levels.storage - 1] : 0;
   const cargoCap = me ? UPGRADES.cargo.caps[me.levels.cargo - 1] : 0;
   const batteryCap = me ? UPGRADES.battery.caps[me.levels.battery - 1] : 0;
@@ -207,10 +218,46 @@ export function Panels({
             <Flame className="size-4" />
             Process all stored waste
           </Button>
+          {/* Sprint 2.13 — Storage Shipment */}
+          {isManual && (
+            <>
+              {!shippingActive && (
+                <Button
+                  variant="outline"
+                  className="mt-2 w-full cursor-pointer gap-2 border-yellow-400/50 text-yellow-300"
+                  disabled={sealed || !me?.hasBase || (me?.storageKg ?? 0) <= 0}
+                  onClick={onShipStorage}
+                >
+                  🚚 Ship all to burner (60s)
+                </Button>
+              )}
+              {shippingActive && !shippingDone && (
+                <div className="mt-2 rounded-md border border-yellow-400/30 bg-yellow-400/5 px-3 py-2">
+                  <p className="font-mono text-[10px] font-bold text-yellow-300">
+                    🚚 In transit: {fmtKg(shipping?.kg ?? 0)}
+                  </p>
+                  <p className="font-mono text-[9px] text-yellow-300/70">
+                    {Math.max(0, Math.ceil(((shipping?.finishAt ?? 0) - now) / 1000))}s remaining
+                  </p>
+                </div>
+              )}
+              {shippingActive && shippingDone && (
+                <Button
+                  variant="outline"
+                  className="mt-2 w-full cursor-pointer gap-2 border-green-400/50 text-green-300"
+                  onClick={onCompleteShipment}
+                >
+                  ✅ Collect shipment ({fmtKg(shipping?.kg ?? 0)})
+                </Button>
+              )}
+            </>
+          )}
           <p className="mt-2 text-center font-mono text-[10px] text-muted-foreground">
             {sealed
               ? "sealed base — the existing burn queue keeps running, new processing is locked"
-              : "burn rate 2 kg/s · only burning removes waste from the world"}
+              : isManual
+                ? "manual mode: ship or process · auto mode: process only"
+                : "burn rate 2 kg/s · only burning removes waste from the world"}
           </p>
         </div>
 
@@ -325,13 +372,31 @@ export function Panels({
             <Switch
               checked={me?.robot.auto ?? true}
               onCheckedChange={onToggleAuto}
-              disabled={sealed}
+              disabled={sealed || isManual}
               className="cursor-pointer"
             />
           </div>
           <p className="mt-2 text-center font-mono text-[10px] leading-4 text-muted-foreground">
             AUTO: the robot picks the nearest free cluster itself · 42 kg/h starter throughput reference
           </p>
+          {/* Manual driving mode toggle */}
+          <div className="mt-3 flex items-center justify-between rounded-md border border-border/70 bg-background/50 px-3 py-2.5">
+            <span className="flex items-center gap-2 text-sm">
+              <Gamepad2 className="size-4 text-yellow-300" />
+              Manual driving
+            </span>
+            <Switch
+              checked={isManual}
+              onCheckedChange={onToggleManual}
+              disabled={sealed || me?.robot.state !== "idle"}
+              className="cursor-pointer"
+            />
+          </div>
+          {isManual && (
+            <p className="mt-2 rounded-md border border-yellow-400/30 bg-yellow-400/5 px-2 py-1.5 font-mono text-[10px] text-yellow-300">
+              WASD/Arrow keys · E = collect · Drive to base to unload & recharge
+            </p>
+          )}
         </div>
       </TabsContent>
 

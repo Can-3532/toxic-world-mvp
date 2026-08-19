@@ -702,6 +702,74 @@ export const buyExtraBattery = mutation({
   },
 });
 
+/**
+ * Deposit cargo at an active Burn Zone for immediate burn (manual mode).
+ * Burns the full cargo at the zone's ×1.2 multiplier and credits TOX.
+ */
+export const depositAtBurnZone = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (isSealed(p.protection?.state ?? "normal")) throw new Error(SEALED_MSG);
+    if (!(p.manual ?? false)) throw new Error("Not in manual mode");
+    if (p.robot.state !== "driving") throw new Error("Robot not driving");
+    if (p.robot.cargoKg <= 0) throw new Error("No cargo to deposit");
+
+    // Find the active burn zone
+    const zone = await ctx.db
+      .query("burnZones")
+      .withIndex("by_world", (q) => q.eq("worldId", p.worldId))
+      .first();
+    if (!zone || zone.status !== "active") throw new Error("No active burn zone");
+
+    // Check distance
+    const dist = Math.hypot(p.robot.x - zone.x, p.robot.y - zone.y);
+    if (dist > MANUAL.BURN_ZONE_RANGE)
+      throw new Error(`Too far from burn zone (${Math.round(dist)}m)`);
+
+    // Burn the cargo directly at zone multiplier
+    const burnedKg = p.robot.cargoKg;
+    const tox = (burnedKg / 1000) * 500 * zone.multiplier; // zone rate
+    const now = Date.now();
+
+    // Update pollution (burning removes waste from the world)
+    const world = await ctx.db.query("worlds").first();
+    if (world) {
+      await ctx.db.patch(world._id, {
+        pollutionKg: Math.max(0, world.pollutionKg - burnedKg),
+        burnedKg: world.burnedKg + burnedKg,
+      });
+    }
+
+    // Reward ledger entry (exactly-once)
+    const sessionKey = `bz:${p._id}:${now}`;
+    await ctx.db.insert("rewardLedger", {
+      playerId: p._id,
+      worldId: p.worldId,
+      key: sessionKey,
+      kind: "burn_zone",
+      kg: burnedKg,
+      tox,
+      at: now,
+    });
+
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      toxBalance: p.toxBalance + tox,
+      totalBurnedKg: p.totalBurnedKg + burnedKg,
+      toxFromZone: (p.toxFromZone ?? 0) + tox,
+      robot: {
+        ...p.robot,
+        cargoKg: 0,
+      },
+    });
+    return { ok: true, burnedKg, tox, zoneMultiplier: zone.multiplier };
+  },
+});
+
 // ---------------------------------------------------------------------------
 // queries
 // ---------------------------------------------------------------------------
