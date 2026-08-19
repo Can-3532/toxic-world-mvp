@@ -402,26 +402,44 @@ export const toggleManualMode = mutation({
     if (!p) throw new Error("Player not found");
     if (!p.hasBase) throw new Error("Buy a base first");
     if (isSealed(p.protection?.state ?? "normal")) throw new Error(SEALED_MSG);
-    if (p.robot.state !== "idle") throw new Error("Robot is busy — wait for it to finish");
-
     const now = Date.now();
-    const manual = !(p.manual ?? false);
+    const goingManual = !(p.manual ?? false);
     const bx = p.baseX ?? WORLD.MAP_SIZE / 2;
     const by = p.baseY ?? WORLD.MAP_SIZE / 2;
-    await ctx.db.patch(p._id, {
-      lastActiveAt: now,
-      protection: onActivity(p.protection ?? { state: "normal" }),
-      manual,
-      robot: {
-        ...p.robot,
-        state: manual ? "driving" : "idle",
-        x: manual ? p.robot.x : bx,
-        y: manual ? p.robot.y : by,
-        fromX: bx,
-        fromY: by,
-      },
-    });
-    return { ok: true, manual };
+
+    if (goingManual) {
+      // Entering manual: cancel any auto-pilot trip, stop auto, start driving
+      await ctx.db.patch(p._id, {
+        lastActiveAt: now,
+        protection: onActivity(p.protection ?? { state: "normal" }),
+        manual: true,
+        robot: {
+          ...p.robot,
+          state: "driving",
+          auto: false,            // disable auto so tick never steps this robot
+          targetClusterId: undefined,
+          fromX: p.robot.x,
+          fromY: p.robot.y,
+        },
+      });
+    } else {
+      // Exiting manual: go idle at base, keep auto off (player must re-enable)
+      await ctx.db.patch(p._id, {
+        lastActiveAt: now,
+        protection: onActivity(p.protection ?? { state: "normal" }),
+        manual: false,
+        robot: {
+          ...p.robot,
+          state: "idle",
+          targetClusterId: undefined,
+          x: bx,
+          y: by,
+          fromX: bx,
+          fromY: by,
+        },
+      });
+    }
+    return { ok: true, manual: goingManual };
   },
 });
 
@@ -475,9 +493,9 @@ export const moveRobotManual = mutation({
     let storageKg = p.storageKg;
     let cargoKg = p.robot.cargoKg;
     let totalCollectedKg = p.totalCollectedKg;
-    let state: "driving" | "idle" = "driving";
+    let state: "driving" = "driving";
 
-    // Auto-unload at base
+    // Auto-unload at base (keep driving state so keyboard stays active)
     if (distToBase <= MANUAL.BASE_DEPOSIT_RANGE && cargoKg > 0) {
       const space = storageCap(p) - storageKg;
       const unload = Math.min(cargoKg, space);
@@ -487,6 +505,8 @@ export const moveRobotManual = mutation({
         totalCollectedKg += unload;
       }
     }
+    // Always remain in driving state — manual mode means player is in control
+    state = "driving";
 
     // Auto-recharge when near base and battery low
     if (distToBase <= MANUAL.BASE_DEPOSIT_RANGE && newBattery < bCap) {

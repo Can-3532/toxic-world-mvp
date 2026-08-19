@@ -60,14 +60,14 @@ export default function Game() {
   const isManual = me?.manual ?? false;
   const manualRobotState = me?.robot?.state === "driving";
 
-  // Enable/disable keyboard control based on manual mode
+  // Enable/disable keyboard control — always on while in manual mode
   useEffect(() => {
-    setEnabled(isManual && manualRobotState);
-  }, [isManual, manualRobotState, setEnabled]);
+    setEnabled(isManual);
+  }, [isManual, setEnabled]);
 
   // Manual driving loop: read keys, send movement mutation each frame
   useEffect(() => {
-    if (!isManual || !manualRobotState) return;
+    if (!isManual) return;
     let rafId: number;
     const loop = () => {
       const now = performance.now();
@@ -86,7 +86,7 @@ export default function Game() {
     lastFrameRef.current = performance.now();
     rafId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafId);
-  }, [isManual, manualRobotState, getDirection, moveRobotManual]);
+  }, [isManual, getDirection, moveRobotManual]);
 
   const frac = world?.world ? world.world.pollutionKg / world.world.capacityKg : 0;
   const status = world?.world?.status ?? "safe";
