@@ -401,7 +401,7 @@ export default function Game() {
       <main className="mx-auto grid w-full max-w-7xl flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_380px]">
         {/* MAP */}
         <div className="relative">
-          <WorldMap clusters={clusters ?? []} me={me} zone={zone} onCommand={handleCommand} />
+          <WorldMap clusters={clusters ?? []} me={me} zone={zone} onCommand={handleCommand} isManual={isManual} />
 
           {/* Manual mode HUD overlay */}
           {isManual && me.hasBase && (
