@@ -1,16 +1,3 @@
-// TOXIC WORLD — PRODUCTION ENGINE TEST HARNESS (Sprint 2.4 audit, Sprint 2.5
-// clean-world tooling, Sprint 2.6 load/concurrency). Read-only live audit
-// against the deployed engine; the heavy automated scenarios live in
-// tests/engineSim.ts + tests/engine.test.ts (headless oracle driven by the
-// same pure engine module) and the live drivers live in tests/liveBench.ts +
-// tests/liveConcurrency.ts.
-//
-// Usage:
-//   bunx convex run harness:invariantAudit      — two-layer invariant on live DB
-//   bunx convex run harness:reanchorInvariant   — one-time legacy repair (2.4)
-//   bunx convex run harness:resetWorld          — pristine World 0 baseline (2.5)
-//   bunx convex run harness:concurrencyProbe    — tick-guard atomicity (2.6)
-
 import { v } from "convex/values";
 import { mutation, query, MutationCtx } from "./_generated/server";
 import { api } from "./_generated/api";
@@ -50,7 +37,6 @@ export const invariantAudit = query({
     );
 
     const invariant = checkWasteInvariant({
-      // legacy worlds: re-anchor to total waste ever (pollution + burned)
       initialWasteKg:
         world.seedPollutionKg ?? world.pollutionKg + world.burnedKg,
       generatedKg: world.generatedKg ?? 0,
@@ -79,16 +65,6 @@ export const invariantAudit = query({
   },
 });
 
-/**
- * QA-ONLY, one-time repair for worlds created before Sprint 2.4: the invariant
- * telemetry fields (seedPollutionKg / generatedKg) did not exist, so the mass
- * balance reads the pre-telemetry burned waste as skew. Re-anchor from first
- * principles: seed = capacity × initial fraction, generated = pollution +
- * burned − seed (derived from the mass balance itself), which makes both
- * invariants exactly 0 going forward. Does NOT touch game state.
- *
- * Usage:  bunx convex run harness:reanchorInvariant
- */
 export const reanchorInvariant = mutation({
   args: {},
   handler: async (ctx) => {
@@ -116,24 +92,11 @@ export const reanchorInvariant = mutation({
   },
 });
 
-/**
- * SPRINT 2.5 — CLEAN WORLD RESET (QA tool). Re-creates World 0 from scratch:
- * capacity 10,000 t, pollution 50%, collectable 10%, generated 0, burned 0,
- * zero legacy residual. Wipes world doc, waste clusters, event feed and burn
- * zone, and zeroes player-held waste (cargo / storage / processing) so both
- * invariant layers start at exactly 0. Player accounts, bases, balances and
- * upgrade levels are preserved.
- *
- * From this point all benchmarks run against this pristine baseline.
- *
- * Usage:  bunx convex run harness:resetWorld
- */
 export const resetWorld = mutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
 
-    // wipe world-level state
     for (const w of await ctx.db.query("worlds").collect()) {
       await ctx.db.delete(w._id);
     }
@@ -147,7 +110,6 @@ export const resetWorld = mutation({
       await ctx.db.delete(z._id);
     }
 
-    // zero player-held waste (part of the recoverable pool) — keep accounts
     const players = await ctx.db.query("players").collect();
     for (const p of players) {
       const bx = p.baseX ?? WORLD.MAP_SIZE / 2;
@@ -161,7 +123,6 @@ export const resetWorld = mutation({
           sessionId: undefined,
           sliceIndex: 0,
         },
-        // Sprint 2.11: a clean baseline has no protection state — reset it
         lastActiveAt: now,
         protection: { state: "normal" },
         robot: {
@@ -175,10 +136,12 @@ export const resetWorld = mutation({
           cargoKg: 0,
           battery: batteryCap(p),
         },
+        // Sprint 2.13 — reset manual mode on clean baseline
+        manual: false,
+        shipping: { active: false, kg: 0, startAt: 0, finishAt: 0 },
       });
     }
 
-    // pristine World 0 (seedWorld = the same clean baseline the tick uses)
     const world = await seedWorld(ctx, now);
     await ctx.db.insert("burnZones", {
       worldId: 0,
@@ -212,19 +175,13 @@ export const resetWorld = mutation({
   },
 });
 
-// ---------------------------------------------------------------------------
+// ---------------------------------------
 // SPRINT 2.6 — LIVE-DB LOAD & CONCURRENCY HARNESS
-// ---------------------------------------------------------------------------
-// Synthetic load players are marked with `name = LOAD_PLAYER_NAME` and cleaned
-// by `harness:cleanupLoad`. All of them share one synthetic user doc. The
-// world tick body (`runTick`) is driven unthrottled via `harness:tickOnce` so
-// back-to-back ticks can be benchmarked on the real deployment.
+// ---------------------------------------
 
 const LOAD_USER_NAME = "LOAD-BENCH-USER";
 const LOAD_PLAYER_NAME = "LOADTEST";
 
-/** Seed `count` synthetic players (bases, robots, storage/queues) in the live
- * world. Chunk calls (e.g. 2,000) to stay under per-transaction write limits. */
 export const seedLoad = mutation({
   args: {
     count: v.number(),
@@ -251,9 +208,6 @@ export const seedLoad = mutation({
     const levelPool = [1, 1, 1, 2, 3, 5]; // 50% L1, ~33% L2/3, ~17% L5
     const now = Date.now();
     let created = 0;
-    // Sprint 2.6 accounting: seeded storage/queued waste is REAL pool mass —
-    // it must be debited from the world's collectable pool or Layer 2 (pool
-    // invariant) reads it as phantom drift (the pre-fix run measured ~9.7 t).
     let seededHeldKg = 0;
     for (let i = 0; i < args.count; i++) {
       const lv = levelPool[Math.floor(Math.random() * levelPool.length)];
@@ -286,7 +240,6 @@ export const seedLoad = mutation({
           sliceIndex: 0,
         },
         levels: { cargo: lv, recharge: lv, battery: lv, storage: lv },
-        // Sprint 2.11: load players start NORMAL and active (never instantly AFK)
         lastActiveAt: now,
         protection: { state: "normal" },
         robot: {
@@ -304,6 +257,9 @@ export const seedLoad = mutation({
           auto: Math.random() < activeFraction,
           totalTrips: 0,
         },
+        // Sprint 2.13 — load players are always auto mode
+        manual: false,
+        shipping: { active: false, kg: 0, startAt: 0, finishAt: 0 },
       });
       created++;
     }
@@ -316,18 +272,12 @@ export const seedLoad = mutation({
   },
 });
 
-/** Advance the world ONE tick with NO rate-limit guard, returning the engine
- * time (user code + DB ops), the post-tick world snapshot, and Sprint 2.7
- * DB-op counters (query/get = read op, insert/patch/delete = write op;
- * docs fetched per query are not counted). Benchmark-only. */
 export const tickOnce = mutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
     let dbReadOps = 0;
     let dbWriteOps = 0;
-    // count DB operations through a proxy around ctx.db (runTick only touches
-    // ctx.db, so wrapping the context is safe)
     const db = new Proxy(ctx.db, {
       get(target, prop) {
         const key = String(prop);
@@ -370,9 +320,6 @@ export const tickOnce = mutation({
   },
 });
 
-/** Live-DB status for the load/concurrency benchmark: counts, reservation and
- * reward uniqueness, and both invariant layers. Ledger uniqueness is sampled
- * (the full ledger can exceed the 32k-doc scan limit at 10k scale). */
 export const benchStatus = query({
   args: {},
   handler: async (ctx) => {
@@ -396,12 +343,10 @@ export const benchStatus = query({
       const k = String(c.reservedBy);
       ownerCounts.set(k, (ownerCounts.get(k) ?? 0) + 1);
     }
-    // a robot owning 2+ clusters = duplicate reservation
     const dupReservations = [...ownerCounts.values()].reduce(
       (a, n) => a + Math.max(0, n - 1),
       0,
     );
-    // reservation consistency: every reserved cluster's owner still targets it
     let reservationMismatch = 0;
     for (const c of reserved) {
       const owner = players.find((p) => p._id === c.reservedBy);
@@ -415,7 +360,6 @@ export const benchStatus = query({
       }
     }
 
-    // reward uniqueness — sample up to 20 synthetic players
     const sample = players
       .filter((p) => p.name === LOAD_PLAYER_NAME)
       .slice(0, 20);
@@ -473,16 +417,10 @@ export const benchStatus = query({
   },
 });
 
-/** Delete synthetic load players (+ their reward-ledger rows) and the shared
- * synthetic user. Chunked (`limit` per call) to stay under write limits. */
 export const cleanupLoad = mutation({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
     const limit = args.limit ?? 500;
-    // Sprint 2.6 continuation: the 4,096-write-per-mutation budget applies
-    // here too — a 10k bench leaves ledger rows on thousands of players, so
-    // 500 players × ~10 rows would exceed it. Budget the deletes and return
-    // partial progress; the driver loops until `done`.
     const WRITE_BUDGET = 3000;
     const synth = await ctx.db
       .query("players")
@@ -503,7 +441,6 @@ export const cleanupLoad = mutation({
         await ctx.db.delete(r._id);
         ledgerDeleted++;
       }
-      // return the player's held waste (cargo/storage/queue) to the pool
       returnedKg += p.robot.cargoKg + p.storageKg + p.processing.queuedKg;
       await ctx.db.delete(p._id);
       playersDeleted++;
@@ -516,8 +453,6 @@ export const cleanupLoad = mutation({
         });
       }
     }
-    // remove the shared synthetic user ONLY when no synthetic players remain
-    // (a partial pass must never delete it while more players are pending)
     const remaining = await ctx.db
       .query("players")
       .filter((q) => q.eq(q.field("name"), LOAD_PLAYER_NAME))
@@ -538,7 +473,6 @@ export const cleanupLoad = mutation({
   },
 });
 
-/** Minimal world snapshot for the concurrency-test accounting. */
 export const worldStateProbe = query({
   args: {},
   handler: async (ctx) => {
@@ -565,17 +499,6 @@ export const worldStateProbe = query({
   },
 });
 
-/**
- * SPRINT 2.6 — TICK-GUARD ATOMICITY PROBE (the "most important second test").
- * Fires `n` guarded `world:tick` mutations CONCURRENTLY as separate
- * transactions. Under Convex serializable isolation + automatic conflict
- * retry, at most one can advance per guard window: the first commits
- * `lastTick`, the others conflict-retry, re-read the fresh snapshot, and the
- * rate-limit guard returns { advanced: false }. The probe itself writes
- * nothing, so it cannot conflict with or re-run the nested ticks.
- *
- * Usage:  bunx convex run harness:concurrencyProbe '{"n":5}'
- */
 export const concurrencyProbe = mutation({
   args: { n: v.optional(v.number()) },
   handler: async (
@@ -586,8 +509,6 @@ export const concurrencyProbe = mutation({
     advanced: number;
     results: { advanced: boolean; tickMs: number }[];
   }> => {
-    // explicit annotations break the circular inference through the generated
-    // `api` object (which includes this function itself)
     const results: { advanced: boolean; tickMs: number }[] = await Promise.all(
       Array.from({ length: n }, () => ctx.runMutation(api.world.tick)),
     );

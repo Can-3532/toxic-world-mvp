@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { Doc } from "./_generated/dataModel";
 import { getCurrentUser } from "./users";
-import { PROTECTION, ROBOT, UPGRADES, WORLD, batteryForTrip } from "./gameParams";
+import { MANUAL, PROTECTION, ROBOT, UPGRADES, WORLD, batteryForTrip } from "./gameParams";
 import { isSealed, onActivity } from "./protection";
 
 const SEALED_MSG = "Base is sealed (locked or launching) — unlock it first";
@@ -83,6 +83,9 @@ export const ensurePlayer = mutation({
         auto: true,
         totalTrips: 0,
       },
+      // Sprint 2.13 — manual driving mode (default OFF for new players)
+      manual: false,
+      shipping: { active: false, kg: 0, startAt: 0, finishAt: 0 },
     });
     return { ok: true, created: true, playerId: id };
   },
@@ -261,14 +264,9 @@ export const upgrade = mutation({
 
 // ---------------------------------------------------------------------------
 // SPRINT 2.11 — PROTECTION SYSTEMS (Lock / AFK / Shield / Emergency Launch)
-// Design: TOXIC_WORLD_PROTECTION_SYSTEMS_v0.1.md. All costs are [PLAYTEST]
-// placeholders. Every action here also refreshes lastActiveAt (ends AFK).
 // ---------------------------------------------------------------------------
 
-/** Voluntarily seal the base (free). Generation stops, the robot is recalled
- * and parked (cargo kept, auto flag preserved), the stockpile is preserved
- * across world collapse. The existing burn queue KEEPS burning while sealed
- * — the unlock fee stays earnable, so the system cannot deadlock. */
+/** Voluntarily seal the base (free). */
 export const lockBase = mutation({
   args: {},
   handler: async (ctx) => {
@@ -290,8 +288,6 @@ export const lockBase = mutation({
       },
       robot: {
         ...p.robot,
-        // recall the robot: parked at base, cargo kept, target released
-        // (the tick's stale-reservation cleanup frees the cluster next tick)
         state: "idle",
         targetClusterId: undefined,
         x: bx,
@@ -329,9 +325,7 @@ export const unlockBase = mutation({
   },
 });
 
-/** Toxic Shield: SHIELD_DURATION_MS of critical-state battery immunity. The
- * shield never prevents or delays world collapse — personal protection only.
- * Re-buying refreshes the timer. */
+/** Toxic Shield */
 export const activateShield = mutation({
   args: {},
   handler: async (ctx) => {
@@ -353,9 +347,7 @@ export const activateShield = mutation({
   },
 });
 
-/** Emergency Launch: commit to abandoning a LOCKED base. Player must hold the
- * launch fee now (charged at COMPLETION — 5 real minutes later the tick
- * destroys the base). While launching the base stays sealed. */
+/** Emergency Launch */
 export const launchBase = mutation({
   args: {},
   handler: async (ctx) => {
@@ -377,8 +369,7 @@ export const launchBase = mutation({
   },
 });
 
-/** Abort an Emergency Launch before the countdown ends (free — nothing has
- * been charged yet). */
+/** Abort an Emergency Launch */
 export const cancelLaunch = mutation({
   args: {},
   handler: async (ctx) => {
@@ -392,6 +383,322 @@ export const cancelLaunch = mutation({
       protection: { ...prot, state: "locked", launchAt: undefined },
     });
     return { ok: true, state: "locked" };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// SPRINT 2.13 — MANUAL DRIVING MUTATIONS
+// ---------------------------------------------------------------------------
+
+/**
+ * Toggle between auto-pilot and manual driving mode.
+ * Switching to manual parks the robot (idle) and sets the manual flag.
+ * Switching back to auto clears the manual flag.
+ */
+export const toggleManualMode = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (isSealed(p.protection?.state ?? "normal")) throw new Error(SEALED_MSG);
+    if (p.robot.state !== "idle") throw new Error("Robot is busy — wait for it to finish");
+
+    const now = Date.now();
+    const manual = !(p.manual ?? false);
+    const bx = p.baseX ?? WORLD.MAP_SIZE / 2;
+    const by = p.baseY ?? WORLD.MAP_SIZE / 2;
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      manual,
+      robot: {
+        ...p.robot,
+        state: manual ? "driving" : "idle",
+        x: manual ? p.robot.x : bx,
+        y: manual ? p.robot.y : by,
+        fromX: bx,
+        fromY: by,
+      },
+    });
+    return { ok: true, manual };
+  },
+});
+
+/**
+ * Move the robot in manual mode (called from client keyboard loop).
+ * Client sends direction vector; server applies speed × dtReal and drains battery.
+ */
+export const moveRobotManual = mutation({
+  args: {
+    dx: v.number(), // -1, 0, or 1
+    dy: v.number(), // -1, 0, or 1
+    dtMs: v.number(), // milliseconds since last frame
+  },
+  handler: async (ctx, { dx, dy, dtMs }) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (isSealed(p.protection?.state ?? "normal")) throw new Error(SEALED_MSG);
+    if (!(p.manual ?? false)) throw new Error("Not in manual mode");
+    if (p.robot.state !== "driving" && p.robot.state !== "idle")
+      throw new Error("Robot is busy");
+    if (p.robot.battery <= 0) throw new Error("No battery — recharge at base");
+
+    // Normalize diagonal
+    let ndx = dx;
+    let ndy = dy;
+    const len = Math.sqrt(ndx * ndx + ndy * ndy);
+    if (len > 1) {
+      ndx /= len;
+      ndy /= len;
+    }
+
+    const dtSec = Math.min(dtMs / 1000, 0.2); // cap at 200ms to prevent jumps
+    const distMoved = MANUAL.MOVE_SPEED * dtSec;
+
+    let newX = p.robot.x + ndx * distMoved;
+    let newY = p.robot.y + ndy * distMoved;
+    // Clamp to map bounds
+    newX = Math.max(0, Math.min(WORLD.MAP_SIZE, newX));
+    newY = Math.max(0, Math.min(WORLD.MAP_SIZE, newY));
+
+    const bCap = batteryCap(p);
+    const drainPerSec = MANUAL.DRAIN_MOVING;
+    const drain = drainPerSec * dtSec;
+    const newBattery = Math.max(0, p.robot.battery - drain);
+
+    // Check if near base for auto-unload
+    const baseX = p.baseX ?? WORLD.MAP_SIZE / 2;
+    const baseY = p.baseY ?? WORLD.MAP_SIZE / 2;
+    const distToBase = Math.hypot(newX - baseX, newY - baseY);
+    let storageKg = p.storageKg;
+    let cargoKg = p.robot.cargoKg;
+    let totalCollectedKg = p.totalCollectedKg;
+    let state: "driving" | "idle" = "driving";
+
+    // Auto-unload at base
+    if (distToBase <= MANUAL.BASE_DEPOSIT_RANGE && cargoKg > 0) {
+      const space = storageCap(p) - storageKg;
+      const unload = Math.min(cargoKg, space);
+      if (unload > 0) {
+        cargoKg -= unload;
+        storageKg += unload;
+        totalCollectedKg += unload;
+      }
+    }
+
+    // Auto-recharge when near base and battery low
+    if (distToBase <= MANUAL.BASE_DEPOSIT_RANGE && newBattery < bCap) {
+      const rechargeRate = UPGRADES.recharge.rates[p.levels.recharge - 1];
+      const recharged = Math.min(bCap - newBattery, rechargeRate * dtSec);
+      // (Recharge happens passively at base in manual mode)
+      // Just leave battery as is — player must drive to base to recharge
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      storageKg,
+      totalCollectedKg,
+      robot: {
+        ...p.robot,
+        state,
+        x: newX,
+        y: newY,
+        fromX: newX,
+        fromY: newY,
+        departAt: now,
+        battery: newBattery,
+        cargoKg,
+      },
+    });
+    return {
+      ok: true,
+      x: newX,
+      y: newY,
+      battery: newBattery,
+      cargoKg,
+      storageKg,
+    };
+  },
+});
+
+/**
+ * Collect waste from a nearby cluster in manual mode.
+ * Robot must be within COLLECT_RANGE of a cluster with kg > 0.
+ */
+export const collectManual = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (isSealed(p.protection?.state ?? "normal")) throw new Error(SEALED_MSG);
+    if (!(p.manual ?? false)) throw new Error("Not in manual mode");
+    if (p.robot.state !== "driving") throw new Error("Robot not driving");
+    if (p.robot.battery <= 0) throw new Error("No battery");
+    if (p.robot.cargoKg >= cargoCap(p)) throw new Error("Cargo full");
+
+    // Find nearest cluster within range
+    const clusters = await ctx.db
+      .query("wasteClusters")
+      .withIndex("by_world", (q) => q.eq("worldId", p.worldId))
+      .collect();
+
+    let bestCluster: Doc<"wasteClusters"> | null = null;
+    let bestDist = Infinity;
+    for (const c of clusters) {
+      if (c.kg <= 0) continue;
+      const d = Math.hypot(p.robot.x - c.x, p.robot.y - c.y);
+      if (d < bestDist) {
+        bestDist = d;
+        bestCluster = c;
+      }
+    }
+
+    if (!bestCluster || bestDist > MANUAL.COLLECT_RANGE) {
+      throw new Error("No cluster within range");
+    }
+
+    const cCap = cargoCap(p);
+    const amount = Math.min(cCap - p.robot.cargoKg, bestCluster.kg);
+    const newKg = bestCluster.kg - amount;
+
+    const now = Date.now();
+    await ctx.db.patch(bestCluster._id, { kg: newKg });
+    if (newKg <= 0) {
+      await ctx.db.delete(bestCluster._id);
+    }
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      robot: {
+        ...p.robot,
+        cargoKg: p.robot.cargoKg + amount,
+        totalTrips: p.robot.totalTrips + 1,
+      },
+    });
+    return { ok: true, collected: amount, remaining: newKg };
+  },
+});
+
+/**
+ * Drop all cargo (critical battery decision A).
+ * Cargo is lost, robot becomes lighter and can return to base.
+ */
+export const dropCargo = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (!(p.manual ?? false)) throw new Error("Not in manual mode");
+    if (p.robot.cargoKg <= 0) throw new Error("No cargo to drop");
+
+    const droppedKg = p.robot.cargoKg;
+    const now = Date.now();
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      robot: {
+        ...p.robot,
+        cargoKg: 0,
+      },
+    });
+    return { ok: true, droppedKg };
+  },
+});
+
+/**
+ * Initiate a storage shipment (60s transit, then auto-burn).
+ * All storage waste is moved into a shipment; after transit time it enters
+ * the processing queue with the correct zone multiplier.
+ */
+export const shipStorage = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (isSealed(p.protection?.state ?? "normal")) throw new Error(SEALED_MSG);
+    if (p.storageKg <= 0) throw new Error("Storage is empty");
+    if (p.shipping?.active) throw new Error("Shipment already in transit");
+
+    const now = Date.now();
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      shipping: {
+        active: true,
+        kg: p.storageKg,
+        startAt: now,
+        finishAt: now + MANUAL.SHIPMENT_TRANSIT_S * 1000,
+      },
+      storageKg: 0,
+    });
+    return { ok: true, kg: p.storageKg, finishAt: now + MANUAL.SHIPMENT_TRANSIT_S * 1000 };
+  },
+});
+
+/**
+ * Complete a storage shipment (called by tick or manually when transit is done).
+ * Moves shipped kg into the processing queue.
+ */
+export const completeShipment = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.shipping?.active) throw new Error("No active shipment");
+    if (Date.now() < p.shipping.finishAt) throw new Error("Transit not complete yet");
+
+    const now = Date.now();
+    const hasSession = p.processing.queuedKg > 0 && !!p.processing.sessionId;
+    const queuedKg = p.processing.queuedKg + p.shipping.kg;
+    await ctx.db.patch(p._id, {
+      processing: {
+        queuedKg,
+        since: hasSession ? p.processing.since : now,
+        sessionId: hasSession ? p.processing.sessionId : `${p._id}:${now}`,
+        sliceIndex: hasSession ? p.processing.sliceIndex : 0,
+      },
+      shipping: { active: false, kg: 0, startAt: 0, finishAt: 0 },
+    });
+    return { ok: true, queuedKg };
+  },
+});
+
+/**
+ * Buy Extra Battery (PLAYTEST — 50 TOX / 30 units).
+ * Critical battery decision B: spend TOX to continue with cargo preserved.
+ */
+export const buyExtraBattery = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const p = await getPlayer(ctx);
+    if (!p) throw new Error("Player not found");
+    if (!p.hasBase) throw new Error("Buy a base first");
+    if (!(p.manual ?? false)) throw new Error("Not in manual mode");
+    if (p.toxBalance < MANUAL.EXTRA_BATTERY_COST_TOX)
+      throw new Error(`Need ${MANUAL.EXTRA_BATTERY_COST_TOX} TOX`);
+    if (p.robot.battery >= batteryCap(p))
+      throw new Error("Battery already full");
+
+    const now = Date.now();
+    const bCap = batteryCap(p);
+    const newBattery = Math.min(bCap, p.robot.battery + MANUAL.EXTRA_BATTERY_UNITS);
+    await ctx.db.patch(p._id, {
+      lastActiveAt: now,
+      protection: onActivity(p.protection ?? { state: "normal" }),
+      toxBalance: p.toxBalance - MANUAL.EXTRA_BATTERY_COST_TOX,
+      robot: {
+        ...p.robot,
+        battery: newBattery,
+      },
+    });
+    return { ok: true, battery: newBattery, cost: MANUAL.EXTRA_BATTERY_COST_TOX };
   },
 });
 

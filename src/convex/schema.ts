@@ -23,6 +23,8 @@ export const robotStateValidator = v.union(
   v.literal("to_base"),
   v.literal("unloading"),
   v.literal("recharging"),
+  // Sprint 2.13 — manual driving: player steers via WASD/Arrows
+  v.literal("driving"),
 );
 export type RobotState = Infer<typeof robotStateValidator>;
 
@@ -159,6 +161,15 @@ const schema = defineSchema(
         busyUntil: v.optional(v.number()),
         auto: v.boolean(),
         totalTrips: v.number(),
+      }),
+      // Sprint 2.13 — manual driving mode (WASD / Arrow key control)
+      manual: v.boolean(),
+      // Sprint 2.13 — storage shipment (player-initiated, 60s transit)
+      shipping: v.object({
+        active: v.boolean(),
+        kg: v.number(),
+        startAt: v.number(),
+        finishAt: v.number(),
       }),
     })
       .index("by_user", ["userId"])

@@ -93,6 +93,7 @@ export const PROTECTION = {
 } as const;
 
 // --- v0.4 reward economy ---------------------------------------------
+// Normal Burn = 500 TOX/t · Burn Zone = 600 TOX/t (×1.2)
 export const TOX_PER_TON = 500; // 1 ton burned waste = 500 TOX (normal burn)
 export const BURN_ZONE_MULTIPLIER = 1.2; // Burn Zone: ×1.2 => 600 TOX / ton
 
@@ -186,3 +187,26 @@ export function batteryForTrip(dist: number): number {
   const travel = (dist / ROBOT.SPEED_M_S) * ROBOT.DRAIN_MOVING; // outbound
   return 2 * travel + ROBOT.COLLECT_TIME_S * ROBOT.DRAIN_COLLECTING + ROBOT.BATTERY_SAFETY_MARGIN;
 }
+
+// --- SPRINT 2.13 — MANUAL ROBOT CONTROLS
+// WASD / Arrow key driven movement. Player steers the robot directly;
+// no auto-pilot. Battery drains in real time while moving.
+export const MANUAL = {
+  MOVE_SPEED: ROBOT.SPEED_M_S, // 6 units/s — same as auto, but player-controlled
+  COLLECT_RANGE: 30, // robot must be within this distance of a cluster to collect
+  DRAIN_MOVING: ROBOT.DRAIN_MOVING, // same drain rate as auto
+  DRAIN_COLLECTING: ROBOT.DRAIN_COLLECTING,
+  // Battery thresholds (fraction of cap)
+  LOW_BATTERY_FRAC: 0.3, // show "BATARYA AZALDI!"
+  CRITICAL_BATTERY_FRAC: 0.1, // 10% deviation rule — show "KRİTİK BATARYA" + decision modal
+  // 10% additional-distance rule: if battery < return_energy × 1.1, critical
+  CRITICAL_DISTANCE_MULT: 1.1,
+  // Extra Battery item (PLAYTEST — not final freeze)
+  EXTRA_BATTERY_COST_TOX: 50,
+  EXTRA_BATTERY_UNITS: 30,
+  // Storage shipment
+  SHIPMENT_TRANSIT_S: 60, // 60 real seconds for full shipment
+  // Burn zone proximity
+  BURN_ZONE_RANGE: 40, // distance to deposit cargo at an active burn zone
+  BASE_DEPOSIT_RANGE: 40, // distance to deposit cargo at base
+} as const;
